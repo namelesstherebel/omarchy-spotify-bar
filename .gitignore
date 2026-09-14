@@ -1,0 +1,21 @@
+# Runtime data must stay outside version control.
+config.json
+spotify.json
+*.token
+*.secret
+*.lock
+*.login-required
+*.rate-limit
+
+# Test and interpreter artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage/
+
+# Editor and build artifacts.
+*.swp
+*~
+build/
+dist/

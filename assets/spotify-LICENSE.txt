@@ -1,0 +1,10 @@
+Spotify icon from Simple Icons 15.0.0, distributed under CC0 1.0 Universal.
+Source: https://github.com/simple-icons/simple-icons/blob/15.0.0/icons/spotify.svg
+License: https://github.com/simple-icons/simple-icons/blob/15.0.0/LICENSE.md
+CC0 legal text: https://creativecommons.org/publicdomain/zero/1.0/legalcode
+Modification: added Spotify green fill #1DB954. Geometry is unchanged.
+
+Spotify and the Spotify logo are trademarks of Spotify AB. CC0 covers the
+contributed vector artwork, not trademark rights. This mark identifies the
+Spotify service; it does not imply endorsement of Oma Spotify.
+Brand guidance: https://developer.spotify.com/documentation/design

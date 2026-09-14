@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "blazeluminati.oma-spotify",
+  "name": "Oma Spotify",
+  "version": "1.0.0",
+  "author": "Blazeluminati",
+  "license": "MIT",
+  "description": "Spotify Connect and optional spotifyd controls in the Omarchy bar.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Spotify",
+    "description": "Now playing, library, search, queue, and Spotify Connect controls",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}
