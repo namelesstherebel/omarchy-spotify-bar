@@ -163,4 +163,181 @@ test('transport always targets the API ID and respects safety gates', () => {
   ctx.transport('next', {});
   assert.equal(calls.length, 1);
 });
+// Execute the real service methods with a fake serialized process. No helper is
+// launched; completions below are synthetic Spotify-shaped pages.
+function listBridge() {
+  const source = fs.readFileSync(path.join(root, 'Service.qml'), 'utf8');
+  const ctx = vm.createContext({State:state, Date, JSON,
+    panelOwners:[], authenticated:true, retryAt:0, pending:[], current:null,
+    deviceGeneration:0,
+    helperTimedOut:false, watchdog:{stop(){}, restart(){}},
+    helper:{running:true, signals:[], signal(n){this.signals.push(n);}}, errorMessage:'', stale:false,
+    playback:state.playbackView(playback, null)});
+  Object.defineProperty(ctx, 'panelOpen', {get:() => ctx.panelOwners.length > 0});
+  Object.defineProperty(ctx, 'busy', {get:() => ctx.current !== null});
+  for (const match of source.matchAll(/^    function \w+\([^]*?^    }/gm))
+    vm.runInContext(match[0], ctx);
+  ctx.pump = () => {
+    if (!ctx.current && ctx.pending.length) {
+      ctx.current = ctx.pending[0]; ctx.pending = ctx.pending.slice(1);
+      ctx.helperTimedOut = false;
+    }
+  };
+  return ctx;
+}
+function listOwner() {
+  return {items:[], view:'tracks', query:'', searchKind:'track', browseUri:'',
+    nextOffset:-1, before:'', listGeneration:0};
+}
+function finishList(ctx, title, next = false) {
+  const job = ctx.current;
+  const page = {items:[{uri:'spotify:track:' + title, name:title}], offset:job.args.offset || 0,
+    limit:2, next:next ? 'https://api.spotify.com/v1/me/tracks?offset=2' : null};
+  const data = job.command === 'search' ? {[job.args.kind + 's']:page} : page;
+  ctx.complete(JSON.stringify({ok:true, data}), 0);
+}
+for (const closing of ['library', 'search']) {
+  test('two popups keep Library/Search results, actions and pages isolated; close ' + closing, () => {
+    const ctx = listBridge(), library = listOwner(), search = listOwner();
+    ctx.setPanelOpen(library, true); ctx.setPanelOpen(search, true);
+    ctx.load(library, 'tracks', '', false);
+    ctx.load(search, 'search', 'needle', false);
+    assert.equal(ctx.current.owner, library, 'active Library request retains its owner');
+    assert.equal(ctx.pending[0].owner, search, 'concurrent Search remains queued for its owner');
+    assert.equal(ctx.listBusy(library), true);
+    assert.equal(ctx.listBusy(search), true);
+    finishList(ctx, 'Library', true);
+    assert.equal(ctx.listBusy(library), false);
+    assert.equal(ctx.listBusy(search), true);
+    assert.equal(library.items[0].title, 'Library');
+    assert.equal(search.items.length, 0);
+    finishList(ctx, 'Search', true);
+    assert.equal(library.view, 'tracks');
+    assert.equal(search.view, 'search');
+    assert.equal(search.query, 'needle');
+    assert.equal(library.items[0].title, 'Library');
+    assert.equal(search.items[0].title, 'Search');
+    const actions = [], request = ctx.request;
+    ctx.request = (command, args) => actions.push({command, args});
+    ctx.playItem(library.items[0]); ctx.playItem(search.items[0]);
+    assert.equal(actions[0].args.uri, 'spotify:track:Library');
+    assert.equal(actions[1].args.uri, 'spotify:track:Search');
+    // Restore real requests, then close either owner while its page is active.
+    ctx.request = request;
+    const closed = closing === 'library' ? library : search;
+    const survivor = closing === 'library' ? search : library;
+    ctx.load(closed, closed.view, closed.query, true);
+    assert.equal(ctx.current.args.offset, 2);
+    ctx.load(survivor, survivor.view, survivor.query, true);
+    ctx.setPanelOpen(closed, false);
+    assert.equal(ctx.panelOpen, true);
+    assert.deepEqual(ctx.helper.signals, [9], 'only the closed owner is killed');
+    assert.equal(ctx.listBusy(closed), false);
+    assert.equal(ctx.listBusy(survivor), true);
+    assert.equal(ctx.pending[0].owner, survivor, 'closing one preserves the other page');
+    const snapshot = JSON.stringify(closed.items);
+    finishList(ctx, 'ClosedLate');
+    assert.equal(JSON.stringify(closed.items), snapshot, 'closed owner ignores late completion');
+    assert.equal(ctx.current.owner, survivor);
+    finishList(ctx, 'More');
+    assert.equal(survivor.items.length, 2);
+    assert.equal(survivor.items[1].title, 'More');
+    assert.equal(survivor.nextOffset, -1);
+    assert.equal(ctx.stale, false);
+    ctx.setPanelOpen(survivor, false);
+    assert.equal(ctx.panelOpen, false);
+  });
+}
+test('same-command jobs never coalesce across popup owners', () => {
+  const a = listOwner(), b = listOwner();
+  for (const command of ['search', 'queue']) {
+    const first = {command, owner:a, generation:1};
+    const second = {command, owner:b, generation:1};
+    assert.equal(state.enqueue([], first, second, 8).queue[0], second);
+    assert.equal(state.enqueue([first], null, second, 8).queue.length, 2);
+    assert.equal(state.enqueue([first], null, {...first, generation:2}, 8).queue.length, 1);
+  }
+});
+test('closing a queued owner preserves active list, devices and transport work', () => {
+  const ctx = listBridge(), a = listOwner(), b = listOwner();
+  ctx.setPanelOpen(a, true); ctx.setPanelOpen(b, true);
+  ctx.load(a, 'tracks', '', false); ctx.load(b, 'search', 'needle', false);
+  ctx.request('devices', {}); ctx.request('next', {});
+  ctx.setPanelOpen(b, false);
+  assert.equal(ctx.current.owner, a);
+  assert.equal(ctx.current.cancelled, undefined);
+  assert.equal(ctx.helper.signals.length, 0);
+  assert.deepEqual(Array.from(ctx.pending, job => job.command), ['devices', 'next']);
+  assert.equal(ctx.load(b, 'tracks', '', false), undefined);
+  assert.equal(ctx.request('library', {kind:'tracks'}, b.listGeneration, false, b), false);
+  assert.equal(ctx.request('library', {kind:'tracks'}), false);
+  finishList(ctx, 'Library');
+  assert.equal(a.items[0].title, 'Library');
+});
+test('reopen and supersede ignore late output including errors, without stopping another owner', () => {
+  for (const raw of ['not JSON', '{"ok":false,"error":{"kind":"auth","message":"Login","retry_after":0}}']) {
+    const ctx = listBridge(), a = listOwner(), b = listOwner();
+    ctx.setPanelOpen(a, true); ctx.setPanelOpen(b, true);
+    ctx.load(a, 'tracks', '', false); ctx.load(b, 'search', 'other', false);
+    ctx.setPanelOpen(a, false); ctx.setPanelOpen(a, true);
+    ctx.load(a, 'search', 'new', false);
+    assert.equal(ctx.current.cancelled, true);
+    assert.equal(ctx.current.owner, null);
+    ctx.complete(raw, 1);
+    assert.equal(ctx.authenticated, true);
+    assert.equal(ctx.stale, false);
+    assert.equal(ctx.current.owner, b);
+    finishList(ctx, 'Other'); finishList(ctx, 'New');
+    assert.equal(a.items[0].title, 'New');
+    assert.equal(b.items[0].title, 'Other');
+    ctx.load(a, 'search', 'obsolete', false);
+    ctx.load(a, 'search', 'latest', false);
+    ctx.complete(raw, 1);
+    finishList(ctx, 'Latest');
+    assert.equal(a.items[0].title, 'Latest');
+    assert.equal(b.items[0].title, 'Other');
+  }
+});
+test('completion generation guard rejects uncancelled stale pages', () => {
+  const ctx = listBridge(), a = listOwner();
+  ctx.setPanelOpen(a, true); ctx.load(a, 'tracks', '', false);
+  a.listGeneration++;
+  finishList(ctx, 'Stale');
+  assert.equal(a.items.length, 0);
+});
+test('browse URI, search kind and recent cursor belong to their own popup', () => {
+  const ctx = listBridge(), a = listOwner(), b = listOwner();
+  ctx.setPanelOpen(a, true); ctx.setPanelOpen(b, true);
+  ctx.browse(a, {uri:'spotify:album:Example'});
+  b.searchKind = 'artist'; ctx.load(b, 'search', 'artist', false);
+  assert.equal(ctx.current.args.uri, 'spotify:album:Example');
+  finishList(ctx, 'AlbumTrack', true);
+  assert.equal(ctx.current.args.kind, 'artist');
+  finishList(ctx, 'Artist');
+  ctx.load(a, a.view, a.query, true);
+  assert.equal(ctx.current.args.uri, 'spotify:album:Example');
+  assert.equal(ctx.current.args.offset, 2);
+  finishList(ctx, 'More');
+  ctx.load(a, 'recent', '', false);
+  ctx.complete(JSON.stringify({ok:true,data:{items:[],cursors:{before:'123'},next:'https://api.spotify.com/v1/me/player/recently-played?before=123'}}), 0);
+  ctx.load(a, a.view, a.query, true);
+  assert.equal(ctx.current.args.before, '123');
+  assert.equal(ctx.current.args.offset, undefined);
+  assert.equal(b.before, '');
+  assert.equal(b.query, 'artist');
+});
+test('queue additions refresh open queue owners without replacing a Search view', () => {
+  const ctx = listBridge(), queue = listOwner(), search = listOwner();
+  ctx.setPanelOpen(queue, true); ctx.setPanelOpen(search, true);
+  queue.view = 'queue';
+  ctx.load(search, 'search', 'needle', false); finishList(ctx, 'Search');
+  ctx.request('enqueue', {uri:'spotify:track:Example'});
+  ctx.complete('{"ok":true,"data":null}', 0);
+  assert.equal(ctx.current.command, 'playback');
+  assert.equal(ctx.pending.length, 1);
+  assert.equal(ctx.pending[0].command, 'queue');
+  assert.equal(ctx.pending[0].owner, queue);
+  assert.equal(search.view, 'search');
+  assert.equal(search.items[0].title, 'Search');
+});
 process.exitCode = failures ? 1 : 0;

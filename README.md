@@ -89,7 +89,7 @@ The bar shows the current title plus play or pause and next controls. Open the p
 - Spotify Connect device selection
 - saving tracks or albums to the library
 
-Seek and volume commit after pointer release or keyboard movement, without sending programmatic updates or duplicate release requests. Open popups on different monitors share the service; closing or destroying one does not stop another popup's work.
+Seek and volume commit after pointer release or keyboard movement, without sending programmatic updates or duplicate release requests. Open popups on different monitors share authentication, playback, devices, and the serialized process queue, but keep independent library/search views, results, and pagination. Closing or destroying one cancels only its list work; late responses cannot replace another popup's results.
 
 Spotify does not expose queue clear or reorder through the API used by this plugin.
 
@@ -159,7 +159,7 @@ git status --short
 
 Use the three exact unittest patterns above: they select only unittest modules. `test_search_style.py` and `test_qml_controls.py` are standalone Qt runners and must each be run explicitly; wildcard unittest discovery is not a complete check, even though imports are now side-effect-free. Both Qt runners use disposable runtime/cache directories under `TMPDIR` and remove them on exit (including fontconfig symlinks that plugin validation rejects). Before committing, stage the reviewed changes and repeat `git diff --cached --check` and `python3 tests/scan_secrets.py` so the index scan covers the proposed commit, including new tests.
 
-The Python tests cover callback, lock/deadline, config, endpoint, input, Secret Service process-boundary, refresh-failure, and safe-error behavior. Callback tests use isolated ephemeral loopback sockets, not Spotify. Node executes the real state module and service functions. Qt extracts and runs the real search, plain-text action label, slider, and popup-owner code with the offscreen Basic style; host integration is not exercised. The QML safety unittest also checks every plugin-owned Text node and the host label boundary. `omarchy plugin validate .` checks the manifest and entry-point paths, not live shell behavior. The redacted secret scan checks Git's index and reachable history for Client ID/token literals and runtime files, allowing named synthetic test fixtures; it is not OCR or arbitrary-encoding detection.
+The Python tests cover callback, lock/deadline, config, endpoint, input, Secret Service process-boundary, refresh-failure, and safe-error behavior. Callback tests use isolated ephemeral loopback sockets, not Spotify. Node executes the real state module and service functions. Qt runs the real panel and extracts the search, plain-text action label, slider, popup-owner, and service code with the offscreen Basic style and a fake process launcher. Two-popup regressions cover Library/Search results, Enter actions, pagination, and closing or destroying either owner; host integration is not exercised. The QML safety unittest also checks every plugin-owned Text node and the host label boundary. `omarchy plugin validate .` checks the manifest and entry-point paths, not live shell behavior. The redacted secret scan checks Git's index and reachable history for Client ID/token literals and runtime files, allowing named synthetic test fixtures; it is not OCR or arbitrary-encoding detection.
 
 ## License and Spotify mark
 

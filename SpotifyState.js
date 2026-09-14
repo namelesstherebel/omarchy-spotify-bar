@@ -83,15 +83,17 @@ function setOwner(owners, owner, open) {
     return result
 }
 
-// Bound pending work. Repeated refreshes coalesce; a newer pending search wins.
+// Bound shared pending work. Coalesce reads only within the same popup owner;
+// a newer pending search wins for that owner, never for another popup.
 // Mutations remain FIFO and are never silently replaced or replayed.
 function enqueue(queue, current, request, cap) {
     var result = queue.slice()
     var refresh = ["status", "playback", "devices", "queue"].indexOf(request.command) >= 0
-    if (refresh && current && current.command === request.command && current.generation === request.generation)
+    if (refresh && current && !current.cancelled && current.owner === request.owner &&
+            current.command === request.command && current.generation === request.generation)
         return {queue: result, accepted: true}
     for (var i = 0; i < result.length; i++) {
-        if (result[i].command !== request.command) continue
+        if (result[i].command !== request.command || result[i].owner !== request.owner) continue
         // A reopened queue/device view needs its own response. Replace obsolete
         // pending work, but do not coalesce it with an older active generation.
         if (refresh || request.command === "search") {

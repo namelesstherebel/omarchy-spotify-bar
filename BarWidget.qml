@@ -27,17 +27,28 @@ BarWidget {
     // Let another bar popup replace this one through the standard coordinator.
     function closeForPopoutSwitch() { close() }
 
+    // Each popup owns its list, independently of shared playback and devices.
+    property QtObject listState: QtObject {
+        property var items: []
+        property int nextOffset: -1
+        property string before: ""
+        property string view: "tracks"
+        property string searchKind: "track"
+        property string query: ""
+        property string browseUri: ""
+        property int listGeneration: 0
+    }
     property var registeredService: null
     function syncPopupOwner() {
         if (registeredService && registeredService !== spotify)
-            registeredService.setPanelOpen(root, false)
+            registeredService.setPanelOpen(listState, false)
         registeredService = spotify
-        if (registeredService) registeredService.setPanelOpen(root, popupOpen)
+        if (registeredService) registeredService.setPanelOpen(listState, popupOpen)
     }
     onPopupOpenChanged: syncPopupOwner()
     onSpotifyChanged: syncPopupOwner()
     Component.onCompleted: syncPopupOwner()
-    Component.onDestruction: if (registeredService) registeredService.setPanelOpen(root, false)
+    Component.onDestruction: if (registeredService) registeredService.setPanelOpen(listState, false)
 
     visible: true
     implicitWidth: vertical ? barSize : controls.implicitWidth
@@ -115,6 +126,8 @@ BarWidget {
         SpotifyPanel {
             anchors.fill: parent
             service: root.spotify
+            listState: root.listState
+            active: root.popupOpen
             bar: root.bar
         }
     }

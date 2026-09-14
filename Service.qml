@@ -21,19 +21,10 @@ Item {
     property var apiPlayback: null
     property var selectedDevice: null
     property var devices: []
-    property var items: []
-    property int nextOffset: -1
-    property string before: ""
-    property string view: "tracks"
-    property string searchKind: "track"
-    property string query: ""
-    property string browseUri: ""
-    property int listGeneration: 0
     property int deviceGeneration: 0
     property var pending: []
     property var current: null
     readonly property bool busy: current !== null
-    readonly property bool listBusy: busy && ["search", "library", "browse", "queue"].indexOf(current.command) >= 0
     property bool helperTimedOut: false
     readonly property var playback: State.playbackView(apiPlayback, selectedDevice)
     property double sampledAt: Date.now()
@@ -43,16 +34,39 @@ Item {
     onPlaybackChanged: sampledAt = Date.now()
 
     function setPanelOpen(owner, open) {
+        if (!owner) return
+        if (!open) cancelList(owner)
         panelOwners = State.setOwner(panelOwners, owner, open)
+    }
+
+    // Only list reads belong to a popup. Keep a cancelled child serialized until
+    // reaped, but detach its owner so destruction cannot leave a dangling QObject.
+    function cancelList(owner) {
+        owner.listGeneration++
+        pending = pending.filter(function(job) { return job.owner !== owner })
+        if (current && current.owner === owner) {
+            current = Object.assign({}, current, {cancelled: true, owner: null})
+            watchdog.stop()
+            if (helper.running) helper.signal(9)
+            else complete("", -1)
+        }
+    }
+
+    function listBusy(owner) {
+        return !!owner && ((current && current.owner === owner) ||
+            pending.some(function(job) { return job.owner === owner }))
     }
 
     // Authorization/setup calls are allowed without a token; all other commands
     // wait for an authenticated account and a cleared retry deadline.
-    function request(command, args, generation, append) {
+    function request(command, args, generation, append, owner) {
         var setup = ["status", "configure", "login"].indexOf(command) >= 0
         if (!setup && (!authenticated || Date.now() < retryAt)) return false
-        if (!panelOpen && ["search", "library", "browse", "queue", "devices"].indexOf(command) >= 0) return false
+        var list = ["search", "library", "browse", "queue"].indexOf(command) >= 0
+        if (list && (panelOwners.indexOf(owner) < 0 || generation !== owner.listGeneration)) return false
+        if (!panelOpen && command === "devices") return false
         var result = State.enqueue(pending, current, {command: command, args: args || {},
+            owner: list ? owner : null,
             generation: command === "devices" ? deviceGeneration : generation === undefined ? -1 : generation, append: !!append}, 8)
         pending = result.queue
         if (!result.accepted) errorMessage = "Too many pending actions. Wait for Spotify to respond."
@@ -104,29 +118,29 @@ Item {
         request(command, args)
     }
 
-    // Replacing the list increments a generation. Late responses from closed or
-    // superseded views are ignored rather than painting mismatched search results.
-    function load(nextView, text, append) {
-        if (!panelOpen || !authenticated) return
+    // Replacing a view cancels only this owner's work. Pagination always uses
+    // that same owner's query, kind, context and generation.
+    function load(owner, nextView, text, append) {
+        if (panelOwners.indexOf(owner) < 0 || !authenticated) return
         if (!append) {
-            view = nextView; query = text || ""; listGeneration++
-            items = []; nextOffset = -1; before = ""
-            pending = pending.filter(function(job) { return ["search", "library", "browse", "queue"].indexOf(job.command) < 0 })
+            cancelList(owner)
+            owner.view = nextView; owner.query = text || ""
+            owner.items = []; owner.nextOffset = -1; owner.before = ""
         }
-        var args = {offset: append ? nextOffset : 0}
-        if (view === "search") {
-            if (!query.trim()) return
-            args.query = query; args.kind = searchKind
-            request("search", args, listGeneration, append)
-        } else if (view === "queue") {
-            request("queue", {}, listGeneration, false)
-        } else if (view === "browse") {
-            args.uri = browseUri
-            request("browse", args, listGeneration, append)
+        var args = {offset: append ? owner.nextOffset : 0}
+        if (owner.view === "search") {
+            if (!owner.query.trim()) return
+            args.query = owner.query; args.kind = owner.searchKind
+            request("search", args, owner.listGeneration, append, owner)
+        } else if (owner.view === "queue") {
+            request("queue", {}, owner.listGeneration, false, owner)
+        } else if (owner.view === "browse") {
+            args.uri = owner.browseUri
+            request("browse", args, owner.listGeneration, append, owner)
         } else {
-            args.kind = view
-            if (view === "recent") { delete args.offset; if (append) args.before = before }
-            request("library", args, listGeneration, append)
+            args.kind = owner.view
+            if (owner.view === "recent") { delete args.offset; if (append) args.before = owner.before }
+            request("library", args, owner.listGeneration, append, owner)
         }
     }
 
@@ -141,9 +155,10 @@ Item {
     }
 
     // Open a context's contents on demand without starting playback.
-    function browse(item) {
-        browseUri = item.uri
-        load("browse", "", false)
+    function browse(owner, item) {
+        if (panelOwners.indexOf(owner) < 0 || !item) return
+        owner.browseUri = item.uri
+        load(owner, "browse", "", false)
     }
 
     // Apply one response, preserving stale playback on failure. Mutations queued
@@ -152,6 +167,12 @@ Item {
         if (!current) return
         watchdog.stop()
         var job = current
+        if (job.cancelled || (job.owner && (panelOwners.indexOf(job.owner) < 0 ||
+                job.generation !== job.owner.listGeneration))) {
+            current = null
+            pump()
+            return
+        }
         var result = State.result(raw, job.command, job.args)
         if (helperTimedOut) result = {ok: false, error: {kind: "network",
             message: "Spotify helper timed out. An action may have completed; refresh before trying again.", retry_after: 0}}
@@ -186,10 +207,10 @@ Item {
             } else if (job.command === "devices") {
                 if (panelOpen && job.generation === deviceGeneration) devices = (data || {}).devices || []
             } else if (["search", "library", "browse", "queue"].indexOf(job.command) >= 0) {
-                if (panelOpen && job.generation === listGeneration) {
+                if (job.owner && panelOwners.indexOf(job.owner) >= 0 && job.generation === job.owner.listGeneration) {
                     var page = State.page(data, job.command === "search" ? job.args.kind : "")
-                    items = job.append ? items.concat(page.items) : page.items
-                    nextOffset = page.nextOffset; before = page.before
+                    job.owner.items = job.append ? job.owner.items.concat(page.items) : page.items
+                    job.owner.nextOffset = page.nextOffset; job.owner.before = page.before
                 }
             } else {
                 errorMessage = ""
@@ -201,7 +222,9 @@ Item {
                     selectedDevice = devices.find(function(device) { return device.id === job.args.device_id }) || null
                     request("devices", {})
                 }
-                if (job.command === "enqueue" && panelOpen && view === "queue") load("queue", "", false)
+                if (job.command === "enqueue") panelOwners.forEach(function(owner) {
+                    if (owner.view === "queue") load(owner, "queue", "", false)
+                })
             }
         }
         pump()
@@ -239,9 +262,8 @@ Item {
             refresh(false)
             request("devices", {})
         } else {
-            listGeneration++
             deviceGeneration++
-            pending = pending.filter(function(job) { return ["search", "library", "browse", "queue", "devices"].indexOf(job.command) < 0 })
+            pending = pending.filter(function(job) { return job.command !== "devices" })
         }
     }
 }

@@ -8,6 +8,8 @@ import QtQuick.Layouts
 Item {
     id: panel
     required property var service
+    required property QtObject listState
+    property bool active: false
     property var bar: null
     readonly property color green: "#1DB954"
     readonly property string sans: bar && bar.fontFamily ? bar.fontFamily : "sans-serif"
@@ -33,13 +35,15 @@ Item {
     // Fetch only the visible list. Search debounce is cancelled on every tab change.
     function loadTab() {
         searchDebounce.stop()
-        if (!service || !service.authenticated) return
-        if (tab === 0) service.load(libraryKind, "", false)
+        if (!active || !service || !service.authenticated) return
+        if (tab === 0) service.load(listState, libraryKind, "", false)
         else if (tab === 1) {
-            service.searchKind = searchKind
-            service.load("search", search.text, false)
-        } else if (tab === 2) service.load("queue", "", false)
+            listState.searchKind = searchKind
+            service.load(listState, "search", search.text, false)
+        } else if (tab === 2) service.load(listState, "queue", "", false)
         else {
+            service.cancelList(listState)
+            listState.view = "devices"
             service.deviceGeneration++
             service.request("devices", {})
         }
@@ -49,12 +53,16 @@ Item {
         loadTab()
         if (tab === 1) search.forceActiveFocus()
     }
-    onVisibleChanged: if (visible) loadTab()
+    onActiveChanged: {
+        searchDebounce.stop()
+        if (active) Qt.callLater(loadTab)
+    }
+    Component.onCompleted: if (active) Qt.callLater(loadTab)
 
     Connections {
         target: panel.service
         function onAuthenticatedChanged() {
-            if (panel.visible && panel.service && panel.service.authenticated) panel.loadTab()
+            if (panel.active && panel.service && panel.service.authenticated) panel.loadTab()
         }
     }
     Timer { id: searchDebounce; interval: 350; onTriggered: panel.loadTab() }
@@ -275,7 +283,7 @@ Item {
                     onTextEdited: searchDebounce.restart()
                     onAccepted: {
                         if (searchDebounce.running) { searchDebounce.stop(); panel.loadTab() }
-                        else if (results.currentIndex >= 0) panel.service.playItem(panel.service.items[results.currentIndex])
+                        else if (results.currentIndex >= 0) panel.service.playItem(panel.listState.items[results.currentIndex])
                     }
                     Keys.onDownPressed: { results.forceActiveFocus(); results.currentIndex = Math.min(results.count - 1, Math.max(0, results.currentIndex + 1)) }
                     Keys.onUpPressed: { results.forceActiveFocus(); results.currentIndex = Math.max(0, results.currentIndex - 1) }
@@ -482,7 +490,7 @@ Item {
                 delegate: Action {
                     required property var modelData
                     text: modelData.name
-                    selected: panel.libraryKind === modelData.key && panel.service.view !== "browse"
+                    selected: panel.libraryKind === modelData.key && panel.listState.view !== "browse"
                     onClicked: { panel.libraryKind = modelData.key; panel.loadTab() }
                 }
             }
@@ -498,11 +506,11 @@ Item {
                 anchors.fill: parent
                 visible: panel.service && panel.tab !== 3 && panel.service.playback.canControl
                 clip: true; spacing: 4
-                model: panel.service ? panel.service.items : []
+                model: panel.listState.items
                 currentIndex: count ? 0 : -1
                 keyNavigationEnabled: true
                 ScrollBar.vertical: ScrollBar { }
-                Keys.onReturnPressed: if (currentIndex >= 0) panel.service.playItem(panel.service.items[currentIndex])
+                Keys.onReturnPressed: if (currentIndex >= 0) panel.service.playItem(panel.listState.items[currentIndex])
                 delegate: Rectangle {
                     id: resultRow
                     required property var modelData
@@ -529,7 +537,7 @@ Item {
                         }
                         Action {
                             text: "Open"; visible: ["album", "artist", "playlist"].indexOf(resultRow.modelData.type) >= 0
-                            onClicked: panel.service.browse(resultRow.modelData)
+                            onClicked: panel.service.browse(panel.listState, resultRow.modelData)
                         }
                         Action {
                             text: "+"; Accessible.name: "Add to queue"
@@ -554,9 +562,9 @@ Item {
                     width: results.width; height: more.visible ? 42 : 0
                     Action {
                         id: more; anchors.centerIn: parent; text: "Load more"
-                        visible: panel.service && (panel.service.nextOffset >= 0 || panel.service.before !== "")
+                        visible: panel.listState.nextOffset >= 0 || panel.listState.before !== ""
                         enabled: panel.service && !panel.service.busy
-                        onClicked: panel.service.load(panel.service.view, panel.service.query, true)
+                        onClicked: panel.service.load(panel.listState, panel.listState.view, panel.listState.query, true)
                     }
                 }
             }
@@ -583,7 +591,7 @@ Item {
                 visible: deviceList.visible ? deviceList.count === 0 : results.count === 0
                 Text { textFormat: Text.PlainText
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: panel.service && panel.service.listBusy ? "Finding your music…"
+                    text: panel.service && panel.service.listBusy(panel.listState) ? "Finding your music…"
                         : deviceList.visible ? "Choose where the music plays"
                         : panel.tab === 1 ? "Search Spotify" : "Nothing here yet"
                     color: panel.palette.text; font.pixelSize: 18; font.family: panel.sans
