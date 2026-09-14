@@ -2,7 +2,8 @@
 """Oma Spotify JSON CLI. Tokens stay in Secret Service, never in its output.
 
 Usage: spotifyctl.py COMMAND [JSON_OBJECT]. All failures produce a safe JSON
-error and exit 1. OAuth opens the user's browser and waits at most 180 seconds.
+error and exit 1. OAuth waits at most 180 seconds for a callback; the complete
+login has a 210-second budget. Other commands have a 45-second budget.
 Only fixed Spotify HTTPS endpoints are reachable; mutations are never retried.
 """
 import base64
@@ -17,6 +18,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -24,6 +26,11 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+COMMAND_TIMEOUT = 45
+LOGIN_TIMEOUT = 210
+CALLBACK_TIMEOUT = 5
+CALLBACK_WAIT = 180
 
 CALLBACK = 'http://127.0.0.1:8888/callback'
 API = 'https://api.spotify.com/v1'
@@ -69,8 +76,33 @@ def private_directory(path):
 
 
 @contextmanager
-def private_lock(path):
-    """Serialize token read/refresh/write across CLI processes using a 0600 lock."""
+def deadline(seconds, kind='network'):
+    """Linux main-thread wall-clock budget, including trickling I/O and subprocesses.
+
+    Nested budgets cannot extend the enclosing deadline. Nothing is retried when
+    interrupted: a mutation may already have been accepted by Spotify.
+    """
+    started = time.monotonic()
+    previous = signal.getsignal(signal.SIGALRM)
+    remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+
+    def expired(_signal, _frame):
+        raise Failure(kind, 'Spotify operation timed out. Refresh before trying another action.')
+
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, min(seconds, remaining) if remaining else seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if remaining:
+            signal.setitimer(signal.ITIMER_REAL, max(0.000001, remaining - (time.monotonic() - started)), interval)
+
+
+@contextmanager
+def private_lock(path, timeout=2):
+    """Serialize credentials with a bounded wait; competing logins reject at once."""
     private_directory(path.parent)
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -78,7 +110,15 @@ def private_lock(path):
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise Failure('storage', 'Spotify lock is not a user-owned regular file.')
         os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        until = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= until:
+                    raise Failure('storage', 'Another Spotify operation holds the lock. Try again later.') from None
+                time.sleep(min(0.05, max(0, until - time.monotonic())))
         yield
     finally:
         os.close(fd)
@@ -103,14 +143,14 @@ def callback_code(path, state):
 def valid_token(data, previous=None):
     """Validate an exchange before replacing credentials; retain rotated refresh data."""
     if not isinstance(data, dict):
-        raise Failure('auth', 'Spotify returned an invalid login response.')
+        raise Failure('network', 'Spotify returned an invalid login response.')
     access = data.get('access_token')
     refresh = data.get('refresh_token', (previous or {}).get('refresh_token'))
     expires = data.get('expires_in')
     if (not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh
             or not isinstance(data.get('token_type'), str) or data['token_type'].lower() != 'bearer'
             or type(expires) not in (int, float) or not math.isfinite(expires) or expires <= 0):
-        raise Failure('auth', 'Spotify returned an invalid login response.')
+        raise Failure('network', 'Spotify returned an invalid login response.')
     return {'access_token': access, 'refresh_token': refresh, 'expires_at': time.time() + expires}
 
 
@@ -196,9 +236,11 @@ class Client:
                     'client_id': self.config['client_id']})
                 token = valid_token(data, token)
                 self.store_token(token)
-            except Failure:
-                self.require_login()
-                raise Failure('auth', 'Spotify token refresh failed. Login again; saved credentials were kept.') from None
+            except Failure as error:
+                # Only definitive authorization rejection persists across calls.
+                if error.kind == 'auth':
+                    self.require_login()
+                raise
             return token['access_token']
 
     def http(self, method, url, query=None, body=None, form=None, token=None):
@@ -230,6 +272,13 @@ class Client:
                 return json.loads(raw) if raw else None
         except HTTPError as error:
             code = error.code
+            invalid_grant = False
+            if url == TOKEN_URL and code == 400:
+                try:
+                    detail = json.loads(error.read(4096))
+                    invalid_grant = isinstance(detail, dict) and detail.get('error') in ('invalid_grant', 'invalid_client')
+                except (ValueError, OSError):
+                    pass
             error.close()
             if code == 429:
                 try:
@@ -237,7 +286,7 @@ class Client:
                 except (TypeError, ValueError):
                     retry = 30
                 raise Failure('rate_limit', 'Spotify is rate limiting requests. Please wait.', retry) from None
-            if code == 401:
+            if code == 401 or invalid_grant:
                 raise Failure('auth', 'Spotify rejected authorization. Login again.') from None
             if code == 404:
                 raise Failure('no_device', 'No available playback device or item. Choose a device and refresh.') from None
@@ -262,8 +311,8 @@ class Client:
                 remaining = 0
             if remaining > 0:
                 raise Failure('rate_limit', 'Spotify is rate limiting requests. Please wait.', remaining)
-        token = self.access_token()
         try:
+            token = self.access_token()
             data = self.http(method, API + path, query, body, token=token)
             if data is not None and not isinstance(data, dict):
                 raise Failure('network', 'Spotify returned an unexpected response. Refresh when ready.')
@@ -293,46 +342,70 @@ class Client:
             def do_GET(handler):
                 """Validate before accepting a code; send only fixed browser text."""
                 try:
-                    if handler.headers.get('Host') != '127.0.0.1:8888':
+                    if handler.headers.get_all('Host') != ['127.0.0.1:8888']:
                         raise Failure('auth', 'Invalid Spotify callback host.')
-                    result['code'] = callback_code(handler.path, state)
+                    code = callback_code(handler.path, state)
                     status, text = 200, 'Spotify callback received. Return to Oma Spotify for the login result.'
                 except Failure as error:
                     result['error'] = error
                     status, text = 400, 'Spotify login was not accepted. Start login again in Oma Spotify.'
-                handler.send_response(status)
-                handler.send_header('Content-Type', 'text/plain; charset=utf-8')
-                handler.send_header('Cache-Control', 'no-store')
-                handler.send_header('Content-Security-Policy', "default-src 'none'")
-                handler.end_headers()
-                handler.wfile.write(text.encode())
+                try:
+                    handler.send_response(status)
+                    handler.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    handler.send_header('Cache-Control', 'no-store')
+                    handler.send_header('Content-Security-Policy', "default-src 'none'")
+                    handler.end_headers()
+                    handler.wfile.write(text.encode())
+                    handler.wfile.flush()
+                except OSError:
+                    # handle_one_request swallows TimeoutError; handle_error is
+                    # therefore not enough. Never accept a partially sent callback.
+                    result['error'] = Failure('auth', 'Spotify callback did not complete. Start login again.')
+                    return
+                if status == 200:
+                    result['code'] = code
 
             def log_message(handler, format, *args):
                 """Suppress BaseHTTPRequestHandler's credential-bearing request log."""
                 pass
 
-        with private_lock(self.state_dir / 'login.lock'):
+        with private_lock(self.state_dir / 'login.lock', timeout=0):
             try:
                 with HTTPServer(('127.0.0.1', 8888), CallbackHandler) as server:
-                    server.timeout = 180
-                    server.socket.settimeout(180)
+                    server.timeout = CALLBACK_WAIT
+                    server.socket.settimeout(CALLBACK_WAIT)
                     # Bound accepted-client reads too, not only accept().
                     original_get_request = server.get_request
 
                     def get_request():
                         """Prevent an idle loopback peer from holding login indefinitely."""
                         connection, address = original_get_request()
-                        connection.settimeout(5)
+                        connection.settimeout(CALLBACK_TIMEOUT)
                         return connection, address
 
                     server.get_request = get_request
+                    original_finish_request = server.finish_request
+
+                    def finish_request(connection, address):
+                        # Socket timeouts alone reset on each byte and permit slow drip.
+                        with deadline(CALLBACK_TIMEOUT, 'auth'):
+                            original_finish_request(connection, address)
+
+                    server.finish_request = finish_request
+                    # HTTPServer normally logs handler exceptions. Keep callback
+                    # diagnostics private and terminate this one-shot attempt.
+                    def handle_error(*_args):
+                        result['error'] = Failure('auth', 'Spotify callback did not complete. Start login again.')
+
+                    server.handle_error = handle_error
                     url = 'https://accounts.spotify.com/authorize?' + urlencode({
                         'client_id': self.config['client_id'], 'response_type': 'code',
                         'redirect_uri': CALLBACK, 'scope': SCOPES, 'state': state,
                         'code_challenge_method': 'S256', 'code_challenge': challenge(verifier)})
                     subprocess.run(['xdg-open', url], stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=10, check=True)
-                    server.handle_request()
+                    with deadline(CALLBACK_WAIT, 'auth'):
+                        server.handle_request()
             except (OSError, subprocess.SubprocessError):
                 raise Failure('setup', 'Cannot start browser login. Check the browser and that port 8888 is free.') from None
             if 'error' in result:
@@ -453,6 +526,13 @@ def load_config(path):
 
 
 def main(argv=None):
+    """Enforce an end-to-end budget, not just per-read socket timeouts."""
+    argv = sys.argv[1:] if argv is None else argv
+    with deadline(LOGIN_TIMEOUT if argv and argv[0] == 'login' else COMMAND_TIMEOUT):
+        return dispatch_main(argv)
+
+
+def dispatch_main(argv=None):
     """Dispatch CLI arguments and print one bounded JSON result, without tracebacks."""
     argv = sys.argv[1:] if argv is None else argv
     try:

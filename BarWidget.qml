@@ -27,8 +27,17 @@ BarWidget {
     // Let another bar popup replace this one through the standard coordinator.
     function closeForPopoutSwitch() { close() }
 
-    onPopupOpenChanged: if (spotify) spotify.panelOpen = popupOpen
-    onSpotifyChanged: if (spotify) spotify.panelOpen = popupOpen
+    property var registeredService: null
+    function syncPopupOwner() {
+        if (registeredService && registeredService !== spotify)
+            registeredService.setPanelOpen(root, false)
+        registeredService = spotify
+        if (registeredService) registeredService.setPanelOpen(root, popupOpen)
+    }
+    onPopupOpenChanged: syncPopupOwner()
+    onSpotifyChanged: syncPopupOwner()
+    Component.onCompleted: syncPopupOwner()
+    Component.onDestruction: if (registeredService) registeredService.setPanelOpen(root, false)
 
     visible: true
     implicitWidth: vertical ? barSize : controls.implicitWidth
@@ -42,23 +51,27 @@ BarWidget {
         WidgetButton {
             id: opener
             bar: root.bar
-            text: root.vertical ? "" : "  " + (root.spotify && root.spotify.authenticated
-                ? root.spotify.playback.title : "Spotify")
+            // Host label/tooltip formatting is outside this plugin's control.
+            text: ""
+            Accessible.name: "Open Spotify"
             fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
             fontSize: Style.font.body
             foreground: root.bar ? root.bar.barForeground : Color.foreground
             activeColor: "#1DB954"
             active: root.popupOpen
             fixedWidth: root.vertical ? root.barSize : Math.min(Style.space(190), Math.max(Style.space(82), implicitLabel.implicitWidth + Style.space(18)))
-            tooltipText: root.spotify && root.spotify.authenticated
-                ? root.spotify.playback.title + (root.spotify.playback.artist ? " · " + root.spotify.playback.artist : "")
-                : "Set up Spotify"
+            tooltipText: "Open Spotify"
             onPressed: root.toggle()
 
-            Text {
+            Text { textFormat: Text.PlainText
                 id: implicitLabel
-                visible: false
-                text: opener.text
+                anchors.centerIn: parent
+                width: parent.width - Style.space(18)
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+                color: opener.foreground
+                text: root.vertical ? "" : "  " + (root.spotify && root.spotify.authenticated
+                    ? root.spotify.playback.title : "Spotify")
                 font.family: opener.fontFamily
                 font.pixelSize: opener.fontSize
             }

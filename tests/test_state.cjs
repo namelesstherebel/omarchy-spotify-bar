@@ -46,15 +46,14 @@ test("artwork permits only Spotify HTTPS hosts", () => {
   assert.equal(context.artUrl("https://spotify.example/image.png"), "");
 });
 
-test("local MPRIS is authoritative only for the confirmed local device", () => {
-  const local = {trackTitle: "Local", trackArtist: "Artist", length: 120, position: 10, isPlaying: true};
-  const api = {device: {id: "1", name: "Oma Spotify", volume_percent: 50}, item: {name: "Remote"}};
-  const localView = context.playbackView(api, local, true, "Oma Spotify", null);
-  assert.equal(localView.source, "local");
-  assert.equal(localView.title, "Local");
+test("API remains authoritative even when a device has the local display name", () => {
+  const api = {device: {id: "1", name: "Oma Spotify", is_restricted: false, volume_percent: 50}, item: {name: "Remote"}};
+  const localView = context.playbackView(api, null);
+  assert.equal(localView.source, "api");
+  assert.equal(localView.title, "Remote");
 
   api.device.name = "Phone";
-  const remoteView = context.playbackView(api, local, true, "Oma Spotify", null);
+  const remoteView = context.playbackView(api, null);
   assert.equal(remoteView.source, "api");
   assert.equal(remoteView.title, "Remote");
 });

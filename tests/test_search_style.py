@@ -41,6 +41,13 @@ Item {
     TestCase {
         name: "SpotifySearchStyle"
         when: windowShown
+        function test_external_action_labels_are_plain_text() {
+            const original = reference.text
+            reference.text = '<b>Device & title</b><img src="file:///not-read">'
+            compare(reference.contentItem.textFormat, Text.PlainText)
+            compare(reference.contentItem.text, reference.text)
+            reference.text = original
+        }
         function test_input_focus() {
             search.forceActiveFocus(Qt.OtherFocusReason)
             compare(search.background.border.color, panel.palette.border)
@@ -81,11 +88,21 @@ Item {
     }
 }
 '''
-with tempfile.TemporaryDirectory(prefix="oma-spotify-search-") as directory:
-    path = Path(directory) / "tst_search.qml"
-    path.write_text(test)
-    raise SystemExit(subprocess.call(
-        ["/usr/lib/qt6/bin/qmltestrunner", "-input", str(path)],
-        env={**os.environ, "QT_QPA_PLATFORM": "offscreen",
-             "QT_QUICK_BACKEND": "software", "QT_QUICK_CONTROLS_STYLE": "Basic"},
-    ))
+def main():
+    with tempfile.TemporaryDirectory(prefix="oma-spotify-search-") as directory:
+        path = Path(directory) / "tst_search.qml"
+        path.write_text(test)
+        runtime = Path(directory) / 'runtime'
+        cache = Path(directory) / 'cache'
+        runtime.mkdir(mode=0o700)
+        cache.mkdir()
+        return subprocess.call(
+            ["/usr/lib/qt6/bin/qmltestrunner", "-input", str(path)],
+            env={**os.environ, 'XDG_RUNTIME_DIR': str(runtime), 'XDG_CACHE_HOME': str(cache),
+                 "QT_QPA_PLATFORM": "offscreen",
+                 "QT_QUICK_BACKEND": "software", "QT_QUICK_CONTROLS_STYLE": "Basic"},
+        )
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

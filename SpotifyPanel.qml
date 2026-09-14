@@ -76,7 +76,7 @@ Item {
             border.color: action.visualFocus ? panel.green : action.selected ? panel.palette.muted : panel.palette.border
             opacity: action.enabled ? 1 : 0.4
         }
-        contentItem: Text {
+        contentItem: Text { textFormat: Text.PlainText
             text: action.text
             font: action.font
             color: action.accent ? "#081c10" : panel.palette.text
@@ -89,6 +89,27 @@ Item {
         id: slider
         implicitHeight: 24
         Accessible.name: "Seek"
+        signal committed(int target)
+        property bool dirty: false
+        property int pendingValue: 0
+        // moved covers keyboard/wheel paths too. Defer until the input event
+        // settles so moved + release cannot send the same action twice.
+        onMoved: {
+            dirty = true
+            pendingValue = Math.round(value)
+            if (!pressed) commitTimer.restart()
+        }
+        onPressedChanged: if (!pressed && dirty) commitTimer.restart()
+        onEnabledChanged: if (!enabled) { dirty = false; commitTimer.stop() }
+        Timer {
+            id: commitTimer
+            interval: 0
+            onTriggered: {
+                if (!slider.dirty || slider.pressed || !slider.enabled) return
+                slider.dirty = false
+                slider.committed(slider.pendingValue)
+            }
+        }
         background: Rectangle {
             x: slider.leftPadding
             y: slider.topPadding + slider.availableHeight / 2 - height / 2
@@ -113,15 +134,15 @@ Item {
             Layout.fillWidth: true
             spacing: 10
             Image { source: "assets/spotify.svg"; Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
-            Text { text: "Spotify"; color: panel.palette.text; font.pixelSize: 23; font.bold: true; font.family: panel.sans }
-            Text { text: "OMA SPOTIFY"; color: panel.palette.muted; font.pixelSize: 9; font.letterSpacing: 2; Layout.leftMargin: 8 }
+            Text { textFormat: Text.PlainText; text: "Spotify"; color: panel.palette.text; font.pixelSize: 23; font.bold: true; font.family: panel.sans }
+            Text { textFormat: Text.PlainText; text: "OMA SPOTIFY"; color: panel.palette.muted; font.pixelSize: 9; font.letterSpacing: 2; Layout.leftMargin: 8 }
             Item { Layout.fillWidth: true }
             Rectangle {
                 Layout.preferredWidth: 7; Layout.preferredHeight: 7; radius: 4
                 color: panel.service && panel.service.stale ? "#e5b567"
                     : panel.service && panel.service.authenticated ? panel.green : panel.palette.muted
             }
-            Text {
+            Text { textFormat: Text.PlainText
                 text: !panel.service ? "Starting" : panel.service.busy ? "Working…"
                     : panel.service.stale ? "Stale" : panel.service.authenticated ? "Connected" : "Not connected"
                 color: panel.palette.muted; font.pixelSize: 11
@@ -139,7 +160,7 @@ Item {
             visible: panel.service && (panel.service.errorMessage !== "" || !panel.service.localAvailable)
             radius: 8
             color: Qt.rgba(panel.green.r, panel.green.g, panel.green.b, 0.08)
-            Text {
+            Text { textFormat: Text.PlainText
                 id: statusText
                 anchors.fill: parent; anchors.margins: 9
                 text: panel.service ? (panel.service.errorMessage || panel.service.localMessage) : ""
@@ -158,12 +179,12 @@ Item {
                 sourceSize.width: 144; sourceSize.height: 144
                 Layout.preferredWidth: 72; Layout.preferredHeight: 72
             }
-            Text {
+            Text { textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignHCenter
                 text: "Connect your Spotify account"
                 color: panel.palette.text; font.pixelSize: 27; font.bold: true; font.family: panel.sans
             }
-            Text {
+            Text { textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignHCenter; Layout.maximumWidth: 500
                 text: "Paste the Client ID from your Spotify Developer Dashboard. The plugin never asks for or accepts a client secret."
                 horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
@@ -197,7 +218,7 @@ Item {
                 onClicked: panel.service.request(panel.service.configured ? "login" : "configure",
                     panel.service.configured ? {} : {client_id: clientId.text})
             }
-            Text {
+            Text { textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignHCenter
                 text: "Spotify Premium required for playback controls · No client secret\nRedirect: http://127.0.0.1:8888/callback"
                 horizontalAlignment: Text.AlignHCenter; color: panel.palette.muted; font.pixelSize: 10
@@ -220,7 +241,7 @@ Item {
                 }
             }
             Item { Layout.fillWidth: true }
-            Text {
+            Text { textFormat: Text.PlainText
                 text: panel.tab === 2 ? "Spotify supports add only. Queue reorder and clear are unavailable." : ""
                 color: panel.palette.muted; font.pixelSize: 9
             }
@@ -277,14 +298,14 @@ Item {
                         border.width: searchType.visualFocus ? 2 : 1
                         border.color: searchType.visualFocus ? panel.green : panel.palette.border
                     }
-                    contentItem: Text {
+                    contentItem: Text { textFormat: Text.PlainText
                         text: searchType.displayText
                         font: searchType.font
                         color: panel.palette.text
                         verticalAlignment: Text.AlignVCenter
                         elide: Text.ElideRight
                     }
-                    indicator: Text {
+                    indicator: Text { textFormat: Text.PlainText
                         x: searchType.width - width - 12
                         y: (searchType.height - height) / 2
                         text: "⌄"
@@ -298,7 +319,7 @@ Item {
                         height: 34
                         highlighted: searchType.highlightedIndex === index
                         hoverEnabled: true
-                        contentItem: Text {
+                        contentItem: Text { textFormat: Text.PlainText
                             text: modelData
                             font: searchType.font
                             color: panel.palette.text
@@ -354,21 +375,21 @@ Item {
                 visible: panel.tab !== 1
                 Layout.fillWidth: true
                 spacing: 5
-                Text {
+                Text { textFormat: Text.PlainText
                     text: panel.service && panel.service.playback.playing ? "NOW PLAYING" : "READY"
                     color: panel.green; font.pixelSize: 9; font.letterSpacing: 2
                 }
-                Text {
+                Text { textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: panel.service ? panel.service.playback.title : "Starting Spotify"
                     color: panel.palette.text; font.pixelSize: 23; font.bold: true
                     font.family: panel.sans; elide: Text.ElideRight
                 }
-                Text {
+                Text { textFormat: Text.PlainText
                     Layout.fillWidth: true; text: panel.service ? panel.service.playback.artist : ""
                     color: panel.palette.muted; font.pixelSize: 13; elide: Text.ElideRight
                 }
-                Text {
+                Text { textFormat: Text.PlainText
                     Layout.fillWidth: true; text: panel.service ? panel.service.playback.album : ""
                     color: panel.palette.muted; font.pixelSize: 11; elide: Text.ElideRight
                 }
@@ -379,14 +400,14 @@ Item {
                     value: panel.service ? panel.service.position : 0
                     enabled: panel.service && panel.service.playback.canControl && !panel.service.stale
                         && !panel.service.busy && panel.service.playback.duration > 0
-                    onPressedChanged: if (!pressed && panel.service)
-                        panel.service.transport("seek", {value: Math.round(value)})
+                    stepSize: 1000
+                    onCommitted: target => { if (panel.service) panel.service.transport("seek", {value: target}) }
                 }
                 RowLayout {
                     Layout.fillWidth: true
-                    Text { text: panel.timeLabel(seek.value); color: panel.palette.muted; font.pixelSize: 10 }
+                    Text { textFormat: Text.PlainText; text: panel.timeLabel(seek.value); color: panel.palette.muted; font.pixelSize: 10 }
                     Item { Layout.fillWidth: true }
-                    Text { text: panel.timeLabel(panel.service ? panel.service.playback.duration : 0); color: panel.palette.muted; font.pixelSize: 10 }
+                    Text { textFormat: Text.PlainText; text: panel.timeLabel(panel.service ? panel.service.playback.duration : 0); color: panel.palette.muted; font.pixelSize: 10 }
                 }
                 RowLayout {
                     Layout.alignment: Qt.AlignHCenter; spacing: 8
@@ -419,8 +440,8 @@ Item {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
-                    Text { Layout.fillWidth: true; text: panel.service ? panel.service.playback.title : ""; color: panel.palette.text; font.bold: true; elide: Text.ElideRight }
-                    Text { Layout.fillWidth: true; text: panel.service ? panel.service.playback.artist : ""; color: panel.palette.muted; elide: Text.ElideRight }
+                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: panel.service ? panel.service.playback.title : ""; color: panel.palette.text; font.bold: true; elide: Text.ElideRight }
+                    Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: panel.service ? panel.service.playback.artist : ""; color: panel.palette.muted; elide: Text.ElideRight }
                 }
                 Action {
                     text: panel.service && panel.service.playback.playing ? "Pause" : "Play"; accent: true
@@ -439,7 +460,7 @@ Item {
                 onClicked: panel.tab = 3
             }
             Item { Layout.fillWidth: true }
-            Text { text: "Volume"; color: panel.palette.muted; font.pixelSize: 10 }
+            Text { textFormat: Text.PlainText; text: "Volume"; color: panel.palette.muted; font.pixelSize: 10 }
             SeekSlider {
                 id: volume
                 Accessible.name: "Playback volume"
@@ -447,10 +468,9 @@ Item {
                 from: 0; to: 100; stepSize: 1
                 value: panel.service ? panel.service.playback.volume : 0
                 enabled: panel.service && panel.service.playback.canVolume && !panel.service.stale && !panel.service.busy
-                onPressedChanged: if (!pressed && panel.service)
-                    panel.service.transport("volume", {value: Math.round(value)})
+                onCommitted: target => { if (panel.service) panel.service.transport("volume", {value: target}) }
             }
-            Text { text: Math.round(volume.value) + "%"; color: panel.palette.muted; Layout.preferredWidth: 34 }
+            Text { textFormat: Text.PlainText; text: Math.round(volume.value) + "%"; color: panel.palette.muted; Layout.preferredWidth: 34 }
         }
 
         RowLayout {
@@ -504,8 +524,8 @@ Item {
                         }
                         ColumnLayout {
                             Layout.fillWidth: true; spacing: 1
-                            Text { Layout.fillWidth: true; text: resultRow.modelData.title; color: panel.palette.text; elide: Text.ElideRight }
-                            Text { Layout.fillWidth: true; text: resultRow.modelData.subtitle; color: panel.palette.muted; font.pixelSize: 10; elide: Text.ElideRight }
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: resultRow.modelData.title; color: panel.palette.text; elide: Text.ElideRight }
+                            Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: resultRow.modelData.subtitle; color: panel.palette.muted; font.pixelSize: 10; elide: Text.ElideRight }
                         }
                         Action {
                             text: "Open"; visible: ["album", "artist", "playlist"].indexOf(resultRow.modelData.type) >= 0
@@ -551,11 +571,9 @@ Item {
                 delegate: Action {
                     required property var modelData
                     width: deviceList.width; height: 48
-                    text: (modelData.name === panel.service.localName ? "This computer · " : "")
-                        + modelData.name + (modelData.is_active ? " · Active" : "")
+                    text: modelData.name + (modelData.is_active ? " · Active" : "")
                     selected: modelData.is_active
                     enabled: !!modelData.id && !modelData.is_restricted && !panel.service.busy
-                        && (modelData.name !== panel.service.localName || panel.service.localAvailable)
                     onClicked: panel.service.request("transfer", {device_id: modelData.id})
                 }
             }
@@ -563,14 +581,14 @@ Item {
             Column {
                 anchors.centerIn: parent; width: parent.width - 40; spacing: 8
                 visible: deviceList.visible ? deviceList.count === 0 : results.count === 0
-                Text {
+                Text { textFormat: Text.PlainText
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: panel.service && panel.service.listBusy ? "Finding your music…"
                         : deviceList.visible ? "Choose where the music plays"
                         : panel.tab === 1 ? "Search Spotify" : "Nothing here yet"
                     color: panel.palette.text; font.pixelSize: 18; font.family: panel.sans
                 }
-                Text {
+                Text { textFormat: Text.PlainText
                     width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
                     text: deviceList.visible ? "Start spotifyd or open Spotify on another Connect device, then refresh."
                         : panel.tab === 1 ? "Search tracks, albums, artists, or playlists. Use ↑, ↓, and Enter."

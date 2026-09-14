@@ -1,14 +1,14 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell.Io
-import Quickshell.Services.Mpris
 import "SpotifyState.js" as State
 
 // The host creates one service for the plugin. It owns API serialization and
 // shared state for every monitor, and it never starts or configures spotifyd.
 Item {
     id: bridge
-    property bool panelOpen: false
+    property var panelOwners: []
+    readonly property bool panelOpen: panelOwners.length > 0
     property bool configured: false
     property bool authenticated: false
     property bool localAvailable: false
@@ -34,19 +34,17 @@ Item {
     property var current: null
     readonly property bool busy: current !== null
     readonly property bool listBusy: busy && ["search", "library", "browse", "queue"].indexOf(current.command) >= 0
-    readonly property var localPlayer: {
-        var players = Mpris.players.values
-        for (var i = 0; i < players.length; i++) {
-            if (/^org\.mpris\.MediaPlayer2\.spotifyd(?:\.|$)/.test(players[i].dbusName || "")) return players[i]
-        }
-        return null
-    }
-    readonly property var playback: State.playbackView(apiPlayback, localPlayer, localAvailable, localName, selectedDevice)
+    property bool helperTimedOut: false
+    readonly property var playback: State.playbackView(apiPlayback, selectedDevice)
     property double sampledAt: Date.now()
     property double now: Date.now()
     readonly property real position: Math.min(playback.duration, Math.max(0, playback.position +
         (playback.playing && !stale ? now - sampledAt : 0)))
     onPlaybackChanged: sampledAt = Date.now()
+
+    function setPanelOpen(owner, open) {
+        panelOwners = State.setOwner(panelOwners, owner, open)
+    }
 
     // Authorization/setup calls are allowed without a token; all other commands
     // wait for an authenticated account and a cleared retry deadline.
@@ -70,7 +68,20 @@ Item {
         pending = pending.slice(1)
         helper.command = ["python3", Qt.resolvedUrl("core/spotifyctl.py").toString().replace(/^file:\/\//, ""),
             current.command, JSON.stringify(current.args)]
+        helperTimedOut = false
         helper.running = true
+        watchdog.interval = current.command === "login" ? 215000 : 50000
+        watchdog.restart()
+    }
+
+    // Kill once and stay busy until the child is reaped. Ignore all late output;
+    // the timed-out action may already have happened and must never be replayed.
+    function expire() {
+        if (!current || helperTimedOut) return
+        helperTimedOut = true
+        pending = []
+        if (helper.running) helper.signal(9)
+        else complete("", -1) // A failed start need not emit an exit signal.
     }
 
     // Manual refresh clears network suspension, but cannot bypass auth or 429.
@@ -84,18 +95,11 @@ Item {
         }
     }
 
-    // Local fast transport uses only spotifyd's MPRIS object. Controls never
-    // optimistically change playback; UI state changes when MPRIS/API confirms it.
+    // Names cannot associate MPRIS with a Connect ID. All transport uses the
+    // explicit API device ID, independent of local spotifyd availability.
     function transport(command, args) {
         if (!playback.canControl || stale || busy || Date.now() < retryAt) return
         args = args || {}
-        if (playback.source === "local" && localPlayer && !args.uri) {
-            if (command === "play" && localPlayer.canPlay) { localPlayer.play(); return }
-            if (command === "pause" && localPlayer.canPause) { localPlayer.pause(); return }
-            if (command === "next" && localPlayer.canGoNext) { localPlayer.next(); return }
-            if (command === "previous" && localPlayer.canGoPrevious) { localPlayer.previous(); return }
-            if (command === "seek" && localPlayer.canSeek) { localPlayer.position = args.value / 1000; return }
-        }
         args.device_id = playback.deviceId
         request(command, args)
     }
@@ -144,12 +148,14 @@ Item {
 
     // Apply one response, preserving stale playback on failure. Mutations queued
     // before an error are dropped, never replayed after reauth or a rate limit.
-    function complete(raw) {
+    function complete(raw, exitCode) {
+        if (!current) return
+        watchdog.stop()
         var job = current
-        var result
-        try { result = JSON.parse(raw) } catch (_) {
-            result = {ok: false, error: {kind: "network", message: "Spotify helper did not return a valid response."}}
-        }
+        var result = State.result(raw, job.command, job.args)
+        if (helperTimedOut) result = {ok: false, error: {kind: "network",
+            message: "Spotify helper timed out. An action may have completed; refresh before trying again.", retry_after: 0}}
+        else if (result.ok && exitCode !== 0) result = State.invalidResult()
         current = null
         if (!result.ok) {
             var error = result.error || {}
@@ -206,8 +212,14 @@ Item {
         stdout: StdioCollector { id: output }
         // stderr is deliberately not forwarded into the shell's logs.
         stderr: StdioCollector { }
-        onExited: bridge.complete(output.text)
+        onExited: (exitCode, exitStatus) => bridge.complete(output.text, exitCode)
     }
+    Timer {
+        id: watchdog
+        repeat: false
+        onTriggered: bridge.expire()
+    }
+    Component.onDestruction: if (helper.running) helper.signal(9)
     Timer {
         interval: bridge.panelOpen ? 4000 : 15000
         running: bridge.enabled && !bridge.suspended

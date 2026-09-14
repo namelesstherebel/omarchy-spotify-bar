@@ -19,6 +19,79 @@ spec.loader.exec_module(spotifyctl)
 
 
 class SpotifyCtlSecurityTests(unittest.TestCase):
+    def test_refresh_recoverable_failures_do_not_require_login(self):
+        for kind in ('network', 'storage', 'rate_limit', 'rejected'):
+            for stage in ('http', 'store_token'):
+                with self.subTest(kind=kind, stage=stage), tempfile.TemporaryDirectory() as directory:
+                    client = spotifyctl.Client({'client_id': 'a' * 32}, Path(directory))
+                    old = {'access_token': 'old', 'refresh_token': 'refresh', 'expires_at': 0}
+                    new = {'access_token': 'new', 'refresh_token': 'refresh',
+                           'expires_in': 3600, 'token_type': 'Bearer'}
+                    with patch.object(client, 'read_token', return_value=old), \
+                            patch.object(client, 'http', return_value=new) as http, \
+                            patch.object(client, 'store_token') as store:
+                        (http if stage == 'http' else store).side_effect = spotifyctl.Failure(kind, 'Safe', 7)
+                        with self.assertRaises(spotifyctl.Failure) as raised:
+                            client.api('GET', '/me/player')
+                    self.assertEqual(raised.exception.kind, kind)
+                    self.assertFalse(client.blocked.exists())
+                    if kind == 'rate_limit':
+                        self.assertGreater(float(client.rate_path.read_text()), spotifyctl.time.time())
+
+    def test_malformed_refresh_preserves_saved_credentials(self):
+        for data in (None, [], {}, {'access_token': 'new', 'token_type': 'Bearer', 'expires_in': True}):
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as directory:
+                client = spotifyctl.Client({'client_id': 'a' * 32}, Path(directory))
+                with patch.object(client, 'read_token', return_value={
+                        'access_token': 'old', 'refresh_token': 'refresh', 'expires_at': 0}), \
+                        patch.object(client, 'http', return_value=data), \
+                        patch.object(client, 'store_token') as store:
+                    with self.assertRaises(spotifyctl.Failure) as raised:
+                        client.access_token()
+                self.assertEqual(raised.exception.kind, 'network')
+                store.assert_not_called()
+                self.assertFalse(client.blocked.exists())
+
+    def test_refresh_http_failures_are_classified_and_rate_limit_blocks_retry(self):
+        for status, body, kind in ((429, b'', 'rate_limit'), (503, b'', 'network'),
+                                   (400, b'not JSON', 'rejected'),
+                                   (400, b'{"error":"invalid_client"}', 'auth'),
+                                   (401, b'', 'auth')):
+            with self.subTest(status=status, body=body), tempfile.TemporaryDirectory() as directory:
+                client = spotifyctl.Client({'client_id': 'a' * 32}, Path(directory))
+                error = HTTPError(spotifyctl.TOKEN_URL, status, 'private diagnostic',
+                                  {'Retry-After': '7'}, BytesIO(body))
+                with patch.object(client, 'read_token', return_value={
+                        'access_token': 'old', 'refresh_token': 'refresh', 'expires_at': 0}) as lookup, \
+                        patch.object(spotifyctl, 'urlopen', side_effect=error) as http, \
+                        patch.object(client, 'store_token') as store:
+                    with self.assertRaises(spotifyctl.Failure) as raised:
+                        client.api('POST', '/me/player/next')
+                    self.assertEqual(raised.exception.kind, kind)
+                    self.assertNotIn('private diagnostic', str(raised.exception))
+                    self.assertEqual(client.blocked.exists(), kind == 'auth')
+                    store.assert_not_called()
+                    if kind == 'rate_limit':
+                        with self.assertRaises(spotifyctl.Failure) as retry:
+                            client.api('POST', '/me/player/next')
+                        self.assertEqual(retry.exception.kind, 'rate_limit')
+                        self.assertGreater(retry.exception.retry_after, 0)
+                    lookup.assert_called_once()
+                    http.assert_called_once()
+
+    def test_definitive_refresh_rejection_requires_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = spotifyctl.Client({'client_id': 'a' * 32}, Path(directory))
+            error = HTTPError(spotifyctl.TOKEN_URL, 400, 'bad', {},
+                              BytesIO(b'{"error":"invalid_grant"}'))
+            with patch.object(client, 'read_token', return_value={
+                    'access_token': 'old', 'refresh_token': 'refresh', 'expires_at': 0}), \
+                    patch.object(spotifyctl, 'urlopen', side_effect=error):
+                with self.assertRaises(spotifyctl.Failure) as raised:
+                    client.access_token()
+            self.assertEqual(raised.exception.kind, 'auth')
+            self.assertTrue(client.blocked.exists())
+
     def test_callback_accepts_only_matching_single_code(self):
         self.assertEqual(spotifyctl.callback_code("/callback?code=abc&state=expected", "expected"), "abc")
         rejected = [
