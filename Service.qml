@@ -39,17 +39,13 @@ Item {
         panelOwners = State.setOwner(panelOwners, owner, open)
     }
 
-    // Only list reads belong to a popup. Keep a cancelled child serialized until
-    // reaped, but detach its owner so destruction cannot leave a dangling QObject.
+    // Only list reads belong to a popup. Detach its owner, but let the helper
+    // finish under its existing deadlines so child cleanup and serialization hold.
     function cancelList(owner) {
         owner.listGeneration++
         pending = pending.filter(function(job) { return job.owner !== owner })
-        if (current && current.owner === owner) {
+        if (current && current.owner === owner)
             current = Object.assign({}, current, {cancelled: true, owner: null})
-            watchdog.stop()
-            if (helper.running) helper.signal(9)
-            else complete("", -1)
-        }
     }
 
     function listBusy(owner) {

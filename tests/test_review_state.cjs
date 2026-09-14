@@ -170,19 +170,16 @@ function listBridge() {
   const ctx = vm.createContext({State:state, Date, JSON,
     panelOwners:[], authenticated:true, retryAt:0, pending:[], current:null,
     deviceGeneration:0,
-    helperTimedOut:false, watchdog:{stop(){}, restart(){}},
-    helper:{running:true, signals:[], signal(n){this.signals.push(n);}}, errorMessage:'', stale:false,
+    Qt:{resolvedUrl:file => ({toString:() => file})},
+    helperTimedOut:false, watchdog:{running:false, stops:0, starts:0,
+      stop(){this.running = false; this.stops++;},
+      restart(){this.running = true; this.starts++;}},
+    helper:{running:false, signals:[], signal(n){this.signals.push(n);}}, errorMessage:'', stale:false,
     playback:state.playbackView(playback, null)});
   Object.defineProperty(ctx, 'panelOpen', {get:() => ctx.panelOwners.length > 0});
   Object.defineProperty(ctx, 'busy', {get:() => ctx.current !== null});
   for (const match of source.matchAll(/^    function \w+\([^]*?^    }/gm))
     vm.runInContext(match[0], ctx);
-  ctx.pump = () => {
-    if (!ctx.current && ctx.pending.length) {
-      ctx.current = ctx.pending[0]; ctx.pending = ctx.pending.slice(1);
-      ctx.helperTimedOut = false;
-    }
-  };
   return ctx;
 }
 function listOwner() {
@@ -231,7 +228,7 @@ for (const closing of ['library', 'search']) {
     ctx.load(survivor, survivor.view, survivor.query, true);
     ctx.setPanelOpen(closed, false);
     assert.equal(ctx.panelOpen, true);
-    assert.deepEqual(ctx.helper.signals, [9], 'only the closed owner is killed');
+    assert.deepEqual(ctx.helper.signals, [], 'closing an owner must not kill its helper');
     assert.equal(ctx.listBusy(closed), false);
     assert.equal(ctx.listBusy(survivor), true);
     assert.equal(ctx.pending[0].owner, survivor, 'closing one preserves the other page');
@@ -248,6 +245,83 @@ for (const closing of ['library', 'search']) {
     assert.equal(ctx.panelOpen, false);
   });
 }
+for (const running of [true, false]) {
+  test('active owner cancellation waits for completion, even with helper.running=' + running, () => {
+    const ctx = listBridge(), a = listOwner(), b = listOwner();
+    ctx.setPanelOpen(a, true); ctx.setPanelOpen(b, true);
+    ctx.load(a, 'tracks', '', false);
+    ctx.load(a, 'tracks', '', true); // pending work for the same owner
+    ctx.load(b, 'search', 'other', false);
+    ctx.request('devices', {}); ctx.request('next', {device_id:device.id});
+    const active = ctx.current, command = ctx.helper.command;
+    const kept = Array.from(ctx.pending).filter(job => job.owner !== a);
+    const generation = a.listGeneration;
+    ctx.helper.running = running; // Also cover the interval before an exit/failed-start notification.
+    const complete = ctx.complete;
+    let completions = 0;
+    ctx.complete = (...args) => { completions++; complete(...args); };
+    ctx.setPanelOpen(a, false);
+    assert.equal(completions, 0, 'cancellation must not synthesize completion');
+    assert.equal(ctx.helper.signals.length, 0, 'cancellation must not signal the helper');
+    assert.equal(ctx.helper.running, running);
+    assert.equal(ctx.helper.command, command);
+    assert.equal(ctx.watchdog.stops, 0, 'keep the existing deadline armed');
+    assert.equal(ctx.watchdog.starts, 1, 'do not restart or advance the helper');
+    assert.equal(ctx.watchdog.running, true);
+    assert.equal(ctx.helperTimedOut, false);
+    assert.equal(ctx.busy, true);
+    assert.equal(ctx.current.command, active.command);
+    assert.equal(ctx.current.args, active.args);
+    assert.equal(ctx.current.owner, null);
+    assert.equal(ctx.current.cancelled, true);
+    assert.equal(a.listGeneration, generation + 1);
+    assert.equal(ctx.listBusy(a), false);
+    assert.deepEqual(Array.from(ctx.pending), kept, 'remove only the cancelled owner’s pending jobs');
+    ctx.pump();
+    assert.equal(ctx.watchdog.starts, 1, 'explicit pump cannot bypass the cancelled helper');
+    finishList(ctx, 'Discarded');
+    assert.equal(a.items.length, 0);
+    assert.equal(ctx.current, kept[0]);
+    assert.equal(ctx.watchdog.starts, 2);
+    finishList(ctx, 'Other');
+    assert.equal(b.items[0].title, 'Other');
+    assert.equal(ctx.current, kept[1]);
+    ctx.cancelList(a); // Shared active work must not acquire a cancelled flag.
+    assert.equal(ctx.current.cancelled, undefined);
+    ctx.complete(JSON.stringify({ok:true,data:{devices:[device]}}), 0);
+    assert.equal(ctx.devices[0].id, device.id);
+    assert.equal(ctx.current, kept[2]);
+    ctx.cancelList(b);
+    assert.equal(ctx.current.cancelled, undefined);
+    ctx.complete('{"ok":true,"data":null}', 0);
+    assert.equal(ctx.current.command, 'playback', 'shared transport retains its state refresh');
+    ctx.complete(JSON.stringify({ok:true,data:playback}), 0);
+    assert.equal(ctx.current, null);
+    assert.equal(ctx.pending.length, 0);
+    assert.equal(ctx.stale, false);
+    assert.equal(ctx.authenticated, true);
+    assert.equal(ctx.helper.signals.length, 0);
+  });
+}
+test('cancelled active owner retains the existing watchdog timeout and reap boundary', () => {
+  const ctx = listBridge(), a = listOwner(), b = listOwner();
+  ctx.setPanelOpen(a, true); ctx.setPanelOpen(b, true);
+  ctx.load(a, 'tracks', '', false); ctx.load(b, 'search', 'other', false);
+  ctx.cancelList(a);
+  assert.equal(ctx.watchdog.running, true);
+  assert.equal(ctx.watchdog.interval, 50000);
+  assert.equal(ctx.helper.signals.length, 0);
+  ctx.expire(); ctx.expire();
+  assert.deepEqual(ctx.helper.signals, [9], 'only the existing timeout may kill an overrun');
+  assert.equal(ctx.busy, true, 'timeout still waits for reaping');
+  assert.equal(ctx.watchdog.starts, 1);
+  assert.equal(ctx.pending.length, 0, 'timeout retains its queue cleanup');
+  ctx.complete('late malformed output', 1);
+  assert.equal(ctx.busy, false);
+  assert.equal(ctx.stale, false, 'cancelled output remains ignored');
+  assert.equal(a.items.length, 0);
+  assert.equal(b.items.length, 0);
+});
 test('same-command jobs never coalesce across popup owners', () => {
   const a = listOwner(), b = listOwner();
   for (const command of ['search', 'queue']) {
