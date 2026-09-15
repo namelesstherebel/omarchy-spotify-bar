@@ -22,11 +22,15 @@ function metadata(value) {
         album: metadata, owner: function(owner) { return fields(owner, {display_name: nullableString}) },
         duration_ms: number, is_playable: boolean, is_local: boolean})
 }
+// An explicit null marks an unavailable item, not a fallback to another wrapper.
+function entryItem(entry) {
+    return entry.uri ? entry : (entry.track !== undefined ? entry.track
+        : entry.item !== undefined ? entry.item : entry.album !== undefined ? entry.album : entry)
+}
 function validEntry(entry) {
     if (entry === null) return true // Spotify can omit unavailable library items.
     if (!object(entry)) return false
-    var item = entry.uri ? entry : (entry.track !== undefined ? entry.track
-        : entry.item !== undefined ? entry.item : entry.album !== undefined ? entry.album : entry)
+    var item = entryItem(entry)
     return item === null || (metadata(item) && string(item.uri) && string(item.name))
 }
 function validDevice(value) {
@@ -115,7 +119,7 @@ function artUrl(value) {
 // Flatten nullable old/new Spotify list wrappers into one presentational contract.
 function itemView(entry) {
     if (!entry || !validEntry(entry)) return null
-    var item = entry.uri ? entry : (entry.track || entry.item || entry.album || entry)
+    var item = entryItem(entry)
     if (!item || !item.uri || !item.name) return null
     var artists = (item.artists || []).map(function(artist) { return artist.name }).join(", ")
     var images = item.images || (item.album || {}).images || []

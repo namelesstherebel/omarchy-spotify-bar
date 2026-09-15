@@ -38,6 +38,35 @@ test('state transformations reject non-array collections without throwing', () =
   assert.equal(state.itemView({uri:'spotify:track:abc',name:'x',artists:{}}), null);
   assert.equal(state.playbackView({...playback,item:{artists:{},images:[null]}}, null).artist, '');
 });
+test('null primary wrapper ignores a malformed alternate album', () => {
+  const entry = {track:null, album:{uri:'spotify:album:abc', name:'Alternate', artists:{}}};
+  const result = state.result(JSON.stringify({ok:true, data:{items:[entry]}}), 'library', {});
+  assert.equal(result.ok, true);
+  assert.equal(state.itemView(result.data.items[0]), null);
+  assert.equal(state.page(result.data).items.length, 0);
+  const ctx = listBridge(), owner = listOwner(), nextOwner = listOwner();
+  ctx.setPanelOpen(owner, true); ctx.setPanelOpen(nextOwner, true);
+  ctx.load(owner, 'tracks', '', false); ctx.load(nextOwner, 'tracks', '', false);
+  ctx.complete(JSON.stringify(result), 0);
+  assert.equal(owner.items.length, 0);
+  assert.equal(ctx.current.owner, nextOwner, 'completion must pump the next request');
+  assert.equal(ctx.stale, false);
+});
+test('selected wrapper artists and images are validated before rendering', () => {
+  const item = {uri:'spotify:track:abc', name:'Title', artists:[{name:'Artist'}],
+    album:{images:[{url:'https://i.scdn.co/image/abc'}]}};
+  for (const wrap of [value => value, value => ({track:value}), value => ({item:value}), value => ({album:value})]) {
+    const view = state.itemView(wrap(item));
+    assert.equal(view.title, 'Title');
+    assert.equal(view.subtitle, 'Artist');
+    assert.equal(view.art, 'https://i.scdn.co/image/abc');
+    for (const invalid of [{artists:{}}, {artists:[null]}, {images:{}}, {images:[null]}, {album:{images:{}}}]) {
+      const entry = wrap({...item, ...invalid});
+      assert.equal(state.validEntry(entry), false);
+      assert.equal(state.itemView(entry), null);
+    }
+  }
+});
 test('same-name remote device stays API-controllable when spotifyd is down', () => {
   const view = state.playbackView(playback, null);
   assert.equal(view.canControl, true);
