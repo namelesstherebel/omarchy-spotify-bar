@@ -44,7 +44,7 @@ Do not copy the client secret. Oma Spotify uses no client-secret authentication 
 Replace the placeholder with the repository's published Git URL:
 
 ```bash
-omarchy plugin add https://github.com/namelesstherebel/oma-spotify.git --enable
+omarchy plugin add https://github.com/namelesstherebel/omarchy-spotify-bar.git --enable
 ```
 
 The manifest ID is `blazeluminati.oma-spotify`. The plugin declares one shared service and one bar widget. Its default section is the center. To enable or move it explicitly:
