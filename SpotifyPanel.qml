@@ -194,13 +194,13 @@ Item {
             }
             Text { textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignHCenter; Layout.maximumWidth: 500
-                text: "Paste the Client ID from your Spotify Developer Dashboard. The plugin never asks for or accepts a client secret."
+                text: "Paste only the Client ID from your Spotify Developer Dashboard. This field is stored as public data; format checks cannot distinguish an ID from a client secret. Never paste a secret. To correct a saved ID, replace it here and choose Save Client ID before connecting."
                 horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
                 color: panel.palette.muted; font.pixelSize: 13; lineHeight: 1.3
             }
             TextField {
                 id: clientId
-                visible: !panel.service || !panel.service.configured
+                enabled: panel.service && !panel.service.busy
                 Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 380
                 placeholderText: "32-character Spotify Client ID"
                 Accessible.name: "Spotify developer Client ID"
@@ -213,18 +213,22 @@ Item {
                     radius: 9; color: panel.palette.raised
                     border.color: clientId.activeFocus ? panel.green : panel.palette.border; border.width: 2
                 }
-                onAccepted: if (text.length === 32 && panel.service)
+                onAccepted: if (text.length === 32 && panel.service && !panel.service.busy)
                     panel.service.request("configure", {client_id: text})
             }
             Action {
                 Layout.alignment: Qt.AlignHCenter
-                text: panel.service && panel.service.configured
-                    ? (panel.service.busy ? "Finish login in your browser…" : "Connect Spotify") : "Save Client ID"
+                text: "Save Client ID"
+                enabled: panel.service && !panel.service.busy && clientId.text.length === 32
+                onClicked: panel.service.request("configure", {client_id: clientId.text})
+            }
+            Action {
+                Layout.alignment: Qt.AlignHCenter
+                text: panel.service && panel.service.current && panel.service.current.command === "login"
+                    ? "Finish login in your browser…" : "Connect Spotify"
                 accent: true
-                enabled: panel.service && !panel.service.busy
-                    && (panel.service.configured || clientId.text.length === 32)
-                onClicked: panel.service.request(panel.service.configured ? "login" : "configure",
-                    panel.service.configured ? {} : {client_id: clientId.text})
+                enabled: panel.service && panel.service.configured && !panel.service.busy
+                onClicked: panel.service.request("login", {})
             }
             Text { textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignHCenter
@@ -323,6 +327,7 @@ Item {
                     delegate: ItemDelegate {
                         required property int index
                         required property string modelData
+                        Accessible.name: modelData
                         width: searchType.popup.availableWidth
                         height: 34
                         highlighted: searchType.highlightedIndex === index
@@ -504,7 +509,7 @@ Item {
             ListView {
                 id: results
                 anchors.fill: parent
-                visible: panel.service && panel.tab !== 3 && panel.service.playback.canControl
+                visible: panel.service && panel.tab !== 3
                 clip: true; spacing: 4
                 model: panel.listState.items
                 currentIndex: count ? 0 : -1
@@ -542,7 +547,8 @@ Item {
                         Action {
                             text: "+"; Accessible.name: "Add to queue"
                             visible: ["track", "episode"].indexOf(resultRow.modelData.type) >= 0
-                            enabled: resultRow.modelData.playable && !panel.service.busy
+                            enabled: resultRow.modelData.playable && panel.service.playback.canControl
+                                && !panel.service.stale && !panel.service.busy
                             onClicked: panel.service.enqueue(resultRow.modelData)
                         }
                         Action {
@@ -553,7 +559,8 @@ Item {
                         }
                         Action {
                             text: "▶"; Accessible.name: "Play item"
-                            enabled: resultRow.modelData.playable && !panel.service.busy
+                            enabled: resultRow.modelData.playable && panel.service.playback.canControl
+                                && !panel.service.stale && !panel.service.busy
                             onClicked: panel.service.playItem(resultRow.modelData)
                         }
                     }
@@ -572,7 +579,7 @@ Item {
             ListView {
                 id: deviceList
                 anchors.fill: parent
-                visible: panel.service && (panel.tab === 3 || !panel.service.playback.canControl)
+                visible: panel.service && panel.tab === 3
                 clip: true; spacing: 6
                 model: panel.service ? panel.service.devices : []
                 ScrollBar.vertical: ScrollBar { }

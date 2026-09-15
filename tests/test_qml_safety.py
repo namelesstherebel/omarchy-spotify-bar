@@ -45,6 +45,20 @@ class QmlSafetyTests(unittest.TestCase):
                     self.assertEqual(len(roots), 1)
                     self.assertFalse(roots[0].exists())
 
+    def test_client_id_warning_does_not_promise_secret_detection(self):
+        panel = (ROOT / 'SpotifyPanel.qml').read_text()
+        readme = (ROOT / 'README.md').read_text()
+        backend = (ROOT / 'core/spotifyctl.py').read_text()
+        for source in (panel, readme):
+            self.assertIn('public data', source)
+            self.assertIn('cannot distinguish', source)
+            self.assertIn('Save Client ID', source)
+            self.assertNotIn('never asks for or accepts a client secret', source)
+            self.assertNotIn('does not request, accept, or store one', source)
+            self.assertNotIn('reject secret-bearing configuration', source)
+        self.assertIn('cannot distinguish', backend)
+        self.assertNotIn('reject secret-bearing or unexpected config', backend)
+
     def test_all_text_nodes_explicitly_use_plain_text(self):
         for name in ('BarWidget.qml', 'SpotifyPanel.qml'):
             source = (ROOT / name).read_text()

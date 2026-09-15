@@ -26,30 +26,47 @@ def suspicious(data, test_file=False):
     return False
 
 
+def git_paths():
+    """Keep each index stage and each reachable commit's full tree paths.
+
+    rev-list --objects supplies only one name per object, not every use of a
+    shared blob/tree. NUL-delimited tree entries preserve tabs and newlines.
+    """
+    for entry in git('ls-files', '--stage', '-z').split(b'\0'):
+        if entry:
+            info, path = entry.split(b'\t', 1)
+            mode, identity, _stage = info.split()
+            yield identity.decode(), path.decode(errors='surrogateescape'), mode != b'160000'
+    for commit in git('rev-list', '--all').splitlines():
+        for entry in git('ls-tree', '-r', '-z', commit.decode()).split(b'\0'):
+            if entry:
+                info, path = entry.split(b'\t', 1)
+                _mode, kind, identity = info.split()
+                yield identity.decode(), path.decode(errors='surrogateescape'), kind == b'blob'
+
+
 def main():
     # Ensure the detector catches generated stand-ins without embedding secrets.
     assert suspicious(('ab' * 16).encode())
     assert suspicious(('BQ' + 'x' * 90).encode())
     assert suspicious(b'{"access_' + b'token":"unexpected-literal"}')
-    objects = {}
-    for entry in git('ls-files', '--stage', '-z').split(b'\0'):
-        if entry:
-            info, path = entry.split(b'\t', 1)
-            objects[info.split()[1].decode()] = path.decode()
-    for entry in git('rev-list', '--objects', '--all').decode().splitlines():
-        parts = entry.split(' ', 1)
-        if len(parts) == 2:
-            objects.setdefault(parts[0], parts[1])
+    inspected = {}
     count = 0
-    for identity, path in objects.items():
-        if git('cat-file', '-t', identity).strip() != b'blob':
-            continue
+    for identity, path, is_blob in git_paths():
         count += 1
         forbidden = PurePosixPath(path).name in ('config.json', 'spotify.json') or path.endswith(
             ('.token', '.secret', '.login-required', '.rate-limit', '.lock'))
-        if forbidden or suspicious(git('cat-file', 'blob', identity), path.startswith('tests/')):
+        if forbidden:
             raise SystemExit(f'Secret scan FAILED: {path} (value redacted)')
-    print(f'Secret scan: {count} index/history blobs checked; no Client ID/token literals or runtime data found.')
+        if not is_blob:
+            continue
+        if identity not in inspected:
+            data = git('cat-file', 'blob', identity)
+            # Cache inspection only, never a path's permission to use fixtures.
+            inspected[identity] = (suspicious(data), suspicious(data, True))
+        if inspected[identity][int(path.startswith('tests/'))]:
+            raise SystemExit(f'Secret scan FAILED: {path} (value redacted)')
+    print(f'Secret scan: {count} index/history paths and {len(inspected)} unique blobs checked; no Client ID/token literals or runtime data found.')
     print('Known synthetic test fixtures allowed; no OCR or arbitrary-encoding detection.')
 
 

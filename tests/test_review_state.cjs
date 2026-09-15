@@ -79,6 +79,7 @@ function bridge() {
     apiPlayback:playback, selectedDevice:device, devices:[device], items:[{title:'Preserved'}],
     playback:state.playbackView(playback, null), stale:false, busy:false,
     helperTimedOut:false, helper:{running:true, signals:[], signal(n) {this.killed=n; this.signals.push(n);}},
+    cleanupWatchdog:{stop(){},restart(){this.running=true;}},
     watchdog:{stop(){},restart(){}}, pump(){}, request(){throw Error('mutation replayed');}});
   for (const name of ['complete','expire','transport']) {
     const match = source.match(new RegExp('^    function '+name+'\\([^]*?^    }', 'm'));
@@ -86,10 +87,13 @@ function bridge() {
   }
   return ctx;
 }
-test('watchdog kills once and ignores successful late mutation output', () => {
+test('watchdog terminates for child cleanup and ignores successful late mutation output', () => {
+  const source = fs.readFileSync(path.join(root, 'Service.qml'), 'utf8');
+  assert.match(source, /Component.onDestruction: if \(helper.running\) helper.signal\(15\)/);
   const ctx = bridge();
   ctx.expire();
-  assert.equal(ctx.helper.killed, 9);
+  assert.equal(ctx.helper.killed, 15);
+  assert.equal(ctx.cleanupWatchdog.running, true);
   ctx.expire();
   assert.equal(ctx.helper.signals.length, 1);
   assert.equal(ctx.pending.length, 0);
@@ -100,6 +104,24 @@ test('watchdog kills once and ignores successful late mutation output', () => {
   assert.equal(ctx.suspended, true);
   assert.equal(ctx.authenticated, true);
   ctx.complete('{"ok":true,"data":null}', 0); // duplicate exit is harmless
+});
+test('watchdog escalation is bounded and cannot kill a subsequent helper', () => {
+  const source = fs.readFileSync(path.join(root, 'Service.qml'), 'utf8');
+  const timer = source.match(/Timer \{\s*id: cleanupWatchdog[^]*?\n    }/)[0];
+  assert.match(timer, /interval: 2000/);
+  assert.match(timer, /repeat: false/);
+  const trigger = timer.match(/onTriggered: (.+)/)[1];
+  const ctx = bridge();
+  ctx.bridge = ctx;
+  ctx.expire();
+  vm.runInContext(trigger, ctx);
+  assert.deepEqual(ctx.helper.signals, [15, 9]);
+  ctx.complete('late', 1);
+  assert.equal(ctx.suspended, true);
+  ctx.current = {command:'status',args:{}};
+  ctx.helperTimedOut = false;
+  vm.runInContext(trigger, ctx);
+  assert.deepEqual(ctx.helper.signals, [15, 9]);
 });
 test('watchdog clears a helper that failed to start without waiting for an exit', () => {
   const ctx = bridge();
@@ -165,23 +187,41 @@ test('transport always targets the API ID and respects safety gates', () => {
 });
 // Execute the real service methods with a fake serialized process. No helper is
 // launched; completions below are synthetic Spotify-shaped pages.
-function listBridge() {
+function listBridge(helperUrl = 'file:///synthetic/core/spotifyctl.py') {
   const source = fs.readFileSync(path.join(root, 'Service.qml'), 'utf8');
   const ctx = vm.createContext({State:state, Date, JSON,
     panelOwners:[], authenticated:true, retryAt:0, pending:[], current:null,
     deviceGeneration:0,
-    Qt:{resolvedUrl:file => ({toString:() => file})},
+    resolutions:0,
+    Qt:{resolvedUrl:file => {ctx.resolutions++; return {toString:() => helperUrl};}},
+    decodeURIComponent,
+    cleanupWatchdog:{stop(){},restart(){}},
     helperTimedOut:false, watchdog:{running:false, stops:0, starts:0,
       stop(){this.running = false; this.stops++;},
       restart(){this.running = true; this.starts++;}},
     helper:{running:false, signals:[], signal(n){this.signals.push(n);}}, errorMessage:'', stale:false,
     playback:state.playbackView(playback, null)});
+  const helperPath = source.match(/^    readonly property string helperPath: (.+)$/m);
+  if (helperPath) vm.runInContext('var helperPath = ' + helperPath[1], ctx);
   Object.defineProperty(ctx, 'panelOpen', {get:() => ctx.panelOwners.length > 0});
   Object.defineProperty(ctx, 'busy', {get:() => ctx.current !== null});
   for (const match of source.matchAll(/^    function \w+\([^]*?^    }/gm))
     vm.runInContext(match[0], ctx);
   return ctx;
 }
+test('helper URL is resolved and decoded once, without decoding arguments', () => {
+  const local = '/synthetic/a # %23 %25 % space/core/spotifyctl.py';
+  const ctx = listBridge('file://' + local.split('/').map(encodeURIComponent).join('/'));
+  const args = {client_id:'a'.repeat(32), literal:'# %23 %25 % & ; "'};
+  ctx.request('configure', args);
+  assert.equal(ctx.helper.command[1], local);
+  assert.equal(ctx.helper.command[2], 'configure');
+  assert.deepEqual(JSON.parse(ctx.helper.command[3]), args);
+  ctx.current = null;
+  ctx.request('status', {});
+  assert.equal(ctx.helper.command[1], local);
+  assert.equal(ctx.resolutions, 1, 'resolve at service initialization, not each request');
+});
 function listOwner() {
   return {items:[], view:'tracks', query:'', searchKind:'track', browseUri:'',
     nextOffset:-1, before:'', listGeneration:0};
@@ -312,13 +352,16 @@ test('cancelled active owner retains the existing watchdog timeout and reap boun
   assert.equal(ctx.watchdog.interval, 50000);
   assert.equal(ctx.helper.signals.length, 0);
   ctx.expire(); ctx.expire();
-  assert.deepEqual(ctx.helper.signals, [9], 'only the existing timeout may kill an overrun');
+  assert.deepEqual(ctx.helper.signals, [15], 'timeout requests owned-child cleanup');
   assert.equal(ctx.busy, true, 'timeout still waits for reaping');
   assert.equal(ctx.watchdog.starts, 1);
   assert.equal(ctx.pending.length, 0, 'timeout retains its queue cleanup');
   ctx.complete('late malformed output', 1);
   assert.equal(ctx.busy, false);
-  assert.equal(ctx.stale, false, 'cancelled output remains ignored');
+  assert.equal(ctx.stale, true, 'watchdog failure applies even to cancelled work');
+  assert.equal(ctx.suspended, true);
+  assert.equal(ctx.authenticated, true);
+  assert.match(ctx.errorMessage, /timed out/);
   assert.equal(a.items.length, 0);
   assert.equal(b.items.length, 0);
 });

@@ -2,7 +2,7 @@
 
 Oma Spotify adds a compact Spotify control to the Omarchy top bar. Its popup covers playback, seek, volume, library browsing, search, queue additions, and Spotify Connect devices. Local playback through spotifyd is optional.
 
-The plugin starts blank. Each installer supplies their own Spotify Developer Client ID and logs in with OAuth PKCE. Do not create, paste, store, or commit a client secret. The setup UI and backend reject secret-bearing configuration.
+The plugin starts blank. Each installer supplies their own Spotify Developer Client ID and logs in with OAuth PKCE. Do not create, paste, store, or commit a client secret. The backend rejects unexpected configuration keys, including `client_secret`. The Client ID field is public data: format checks cannot distinguish a 32-hex Client ID from a 32-hex client secret.
 
 ## Screenshots
 
@@ -37,7 +37,7 @@ The plugin starts blank. Each installer supplies their own Spotify Developer Cli
 4. Save the app settings.
 5. Copy the 32-character Client ID only.
 
-Do not copy the client secret. Oma Spotify does not request, accept, or store one.
+Do not copy the client secret. Oma Spotify uses no client-secret authentication and has no secret configuration field. Anything pasted into the Client ID field is treated and stored as public data, not protected as an OAuth credential.
 
 ## Install
 
@@ -63,6 +63,8 @@ Omarchy loads the service and widget from the installed checkout. The plugin has
 3. Choose **Connect Spotify**.
 4. Complete Spotify login in the browser within three minutes. The loopback listener accepts one callback on `127.0.0.1:8888`, then closes. Invalid or incomplete callbacks end that attempt; start login again.
 5. Return to the popup and refresh if playback state has not appeared yet.
+
+If you saved an incorrect ID, replace it in the unauthenticated setup view and choose **Save Client ID**, then **Connect Spotify**. Editing and saving remain available after setup, but are disabled while work is in progress. If you accidentally pasted a client secret, replace it with the Client ID and rotate the exposed secret in the Developer Dashboard.
 
 The requested OAuth scopes cover playback state and controls, profile state, library reads and writes, private and collaborative playlists, and recent playback. Spotify shows the final scope list during login.
 
@@ -91,6 +93,8 @@ The bar shows the current title plus play or pause and next controls. Open the p
 
 Seek and volume commit after pointer release or keyboard movement, without sending programmatic updates or duplicate release requests. Open popups on different monitors share authentication, playback, devices, and the serialized process queue, but keep independent library/search views, results, and pagination. Closing or destroying one cancels only its list work; late responses cannot replace another popup's results.
 
+Library, search, context browsing, saving, and queue viewing remain available after authentication without a playback device. Only playback-dependent actions (including queue additions) require an available Connect device; use **Devices** to select one. Spotify may still return an empty queue or a no-device error for queue reads.
+
 Spotify does not expose queue clear or reorder through the API used by this plugin.
 
 ## Security and storage
@@ -99,7 +103,7 @@ OAuth uses RFC 7636 PKCE with an S256 challenge. The redirect is fixed to `http:
 
 The helper accepts only fixed Spotify HTTPS endpoints and validated relative API paths. It validates action values and Spotify URIs, caps responses at 4 MiB, blocks redirects, persists Spotify rate-limit deadlines (including refresh failures), never retries mutations, and replaces upstream error bodies with fixed messages. Only definitive authorization failures persist a login-required marker; network, keyring, and rate-limit failures preserve authentication.
 
-Each helper invocation has a 45-second absolute deadline (210 seconds for login). An independent QML watchdog kills an overrun after 50 seconds (215 for login), discards queued actions, and ignores late output. A timed-out mutation may already have succeeded: refresh before trying another action. These helper deadlines use Linux main-thread signals.
+Each helper invocation has a 45-second absolute deadline (210 seconds for login). An independent QML watchdog requests termination after 50 seconds (215 for login), discards queued actions, marks state stale and suspends automatic work even if the active list was cancelled. It ignores late output and escalates to SIGKILL after a two-second cleanup grace period. Service destruction also requests termination. The helper kills owned subprocess groups and gives each direct child at most one second to be reaped when interrupted; the deliberately detached OAuth browser is never killed by this cleanup. A timed-out mutation may already have succeeded: refresh before trying another action. These helper deadlines use Linux main-thread signals. Cleanup cannot be guaranteed after an external SIGKILL, a shell crash that bypasses destruction, or uninterruptible kernel I/O; descendants that deliberately leave an owned process group are outside its cleanup boundary.
 
 QML validates complete helper envelopes and the state fields it consumes before applying any result. Malformed responses preserve stale playback and suspend automatic work. External titles, artists, albums, device names, and messages render as plain text, never interpreted markup; host-owned tooltips use fixed text.
 
@@ -128,7 +132,7 @@ Run the `secret-tool clear` command before deleting the config if you need to re
 
 ## Troubleshooting
 
-- **Client ID rejected:** copy the Client ID, not the secret. It must contain exactly 32 hexadecimal characters.
+- **Client ID rejected or login rejects a saved ID:** copy the Client ID, not the secret. It must contain exactly 32 hexadecimal characters, but that format does not prove it is an ID. While unauthenticated, replace it and choose **Save Client ID** before reconnecting. Rotate any secret accidentally pasted into this public field.
 - **Callback rejected:** the dashboard redirect must be exactly `http://127.0.0.1:8888/callback`. `localhost` is not accepted.
 - **Login cannot start:** check that a browser is available and port 8888 is free: `ss -ltn 'sport = :8888'`.
 - **Keyring error:** unlock the desktop keyring and confirm `secret-tool` is installed.
@@ -147,6 +151,7 @@ export TMPDIR="$PWD/build/test-tmp"
 python3 -m unittest discover -s tests -p 'test_spotifyctl.py'
 python3 -m unittest discover -s tests -p 'test_deadlines.py'
 python3 -m unittest discover -s tests -p 'test_qml_safety.py'
+python3 -m unittest discover -s tests -p 'test_scan_secrets.py'
 node tests/test_state.cjs
 node tests/test_review_state.cjs
 python3 tests/test_search_style.py
@@ -157,9 +162,9 @@ python3 tests/scan_secrets.py
 git status --short
 ```
 
-Use the three exact unittest patterns above: they select only unittest modules. `test_search_style.py` and `test_qml_controls.py` are standalone Qt runners and must each be run explicitly; wildcard unittest discovery is not a complete check, even though imports are now side-effect-free. Both Qt runners use disposable runtime/cache directories under `TMPDIR` and remove them on exit (including fontconfig symlinks that plugin validation rejects). Before committing, stage the reviewed changes and repeat `git diff --cached --check` and `python3 tests/scan_secrets.py` so the index scan covers the proposed commit, including new tests.
+Use the four exact unittest patterns above: they select only unittest modules. `test_search_style.py` and `test_qml_controls.py` are standalone Qt runners and must each be run explicitly; wildcard unittest discovery is not a complete check, even though imports are now side-effect-free. Both Qt runners use disposable runtime/cache directories under `TMPDIR` and remove them on exit (including fontconfig symlinks that plugin validation rejects). Before committing, stage the reviewed changes and repeat `git diff --cached --check` and `python3 tests/scan_secrets.py` so the index scan covers the proposed commit, including new tests.
 
-The Python tests cover callback, lock/deadline, config, endpoint, input, Secret Service process-boundary, refresh-failure, and safe-error behavior. Callback tests use isolated ephemeral loopback sockets, not Spotify. Node executes the real state module and service functions. Qt runs the real panel and extracts the search, plain-text action label, slider, popup-owner, and service code with the offscreen Basic style and a fake process launcher. Two-popup regressions cover Library/Search results, Enter actions, pagination, and closing or destroying either owner; host integration is not exercised. The QML safety unittest also checks every plugin-owned Text node and the host label boundary. `omarchy plugin validate .` checks the manifest and entry-point paths, not live shell behavior. The redacted secret scan checks Git's index and reachable history for Client ID/token literals and runtime files, allowing named synthetic test fixtures; it is not OCR or arbitrary-encoding detection.
+The Python tests cover callback, lock/deadline, real owned-child termination/reaping and detached-browser survival, config, endpoint, input, Secret Service process-boundary, refresh-failure, safe-error behavior, and duplicate-blob path authorization in disposable Git repositories. Callback tests use isolated ephemeral loopback sockets, not Spotify. Node executes the real state module and service functions. Qt runs the real panel and extracts the search, plain-text action label, slider, popup-owner, and service code with the offscreen Basic style and a fake process launcher. Two-popup regressions cover Library/Search results, Enter actions, pagination, and closing or destroying either owner; host integration is not exercised. The QML safety unittest also checks every plugin-owned Text node and the host label boundary. `omarchy plugin validate .` checks the manifest and entry-point paths, not live shell behavior. Qt also covers saved-ID correction and busy guards, device-independent browsing, escaped helper source paths and literal arguments, and control-level search-option accessible names. The redacted secret scan checks every index and reachable commit-tree path independently for Client ID/token literals and runtime files, allowing named synthetic fixtures only under their own test paths. Content inspection is deduplicated, path authorization is not; this is not OCR or arbitrary-encoding detection.
 
 ## License and Spotify mark
 

@@ -66,6 +66,47 @@ class NoRedirect(HTTPRedirectHandler):
 urlopen = build_opener(NoRedirect()).open
 
 
+def run_owned(command, *, input=None, capture_output=False, text=False, timeout):
+    """Bound and reap an owned subprocess, including on termination/deadline.
+
+    A private session lets cleanup kill its descendants without touching OAuth's
+    detached browser. Mask interrupts across spawn/registration and cleanup.
+    """
+    blocked = {signal.SIGTERM, signal.SIGALRM}
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    child = None
+    try:
+        child = subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else None,
+                                 stdout=subprocess.PIPE if capture_output else None,
+                                 stderr=subprocess.PIPE if capture_output else None,
+                                 text=text, start_new_session=True)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        stdout, stderr = child.communicate(input, timeout=timeout)
+        return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            if child is not None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=1)
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    if stream is not None:
+                        stream.close()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def open_browser(url):
+    """Detach the intentional OAuth browser; never kill it on timeout or teardown."""
+    child = subprocess.Popen(['xdg-open', url], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    if child.wait(timeout=10) != 0:
+        raise Failure('setup', 'Cannot start browser login. Check the browser.')
+
+
 def private_directory(path):
     """Require a real owner-private directory for locks and non-secret markers."""
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -187,8 +228,8 @@ class Client:
             command += ['--label=Oma Spotify OAuth']
         command += ['application', 'blazeluminati.oma-spotify', 'client-id', self.config['client_id']]
         try:
-            result = subprocess.run(command, input=json.dumps(token) if token else None,
-                                    capture_output=True, text=True, timeout=10)
+            result = run_owned(command, input=json.dumps(token) if token else None,
+                               capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             raise Failure('storage', 'Unlock your Secret Service keyring and install secret-tool.') from None
         if operation == 'lookup' and result.returncode == 1 and not result.stdout and not result.stderr:
@@ -402,8 +443,7 @@ class Client:
                         'client_id': self.config['client_id'], 'response_type': 'code',
                         'redirect_uri': CALLBACK, 'scope': SCOPES, 'state': state,
                         'code_challenge_method': 'S256', 'code_challenge': challenge(verifier)})
-                    subprocess.run(['xdg-open', url], stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, timeout=10, check=True)
+                    open_browser(url)
                     with deadline(CALLBACK_WAIT, 'auth'):
                         server.handle_request()
             except (OSError, subprocess.SubprocessError):
@@ -426,8 +466,8 @@ class Client:
         local = False
         if shutil.which('spotifyd'):
             try:
-                local = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'spotifyd.service'],
-                                       capture_output=True, timeout=3).returncode == 0
+                local = run_owned(['systemctl', '--user', 'is-active', '--quiet', 'spotifyd.service'],
+                                  capture_output=True, timeout=3).returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 pass
         token = self.read_token()
@@ -510,7 +550,10 @@ class Client:
 
 
 def load_config(path):
-    """Read only public app settings; reject secret-bearing or unexpected config."""
+    """Reject unexpected keys; format cannot distinguish a Client ID from a secret.
+
+    The client_id value is public setup data, never a client-secret credential.
+    """
     try:
         config = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -528,8 +571,19 @@ def load_config(path):
 def main(argv=None):
     """Enforce an end-to-end budget, not just per-read socket timeouts."""
     argv = sys.argv[1:] if argv is None else argv
-    with deadline(LOGIN_TIMEOUT if argv and argv[0] == 'login' else COMMAND_TIMEOUT):
-        return dispatch_main(argv)
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def terminated(_signal, _frame):
+        # Unwind owned-process cleanup; repeated termination must not interrupt it.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGTERM, terminated)
+    try:
+        with deadline(LOGIN_TIMEOUT if argv and argv[0] == 'login' else COMMAND_TIMEOUT):
+            return dispatch_main(argv)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def dispatch_main(argv=None):
@@ -547,7 +601,7 @@ def dispatch_main(argv=None):
             identity = args.get('client_id', '')
             if (set(args) != {'client_id'} or not isinstance(identity, str)
                     or not re.fullmatch(r'[A-Fa-f0-9]{32}', identity)):
-                raise Failure('input', 'Enter the 32-character Spotify Client ID, not a client secret.')
+                raise Failure('input', 'Enter only a 32-hex Client ID. This is public data; never paste a client secret.')
             private_directory(config_path.parent)
             temporary = config_path.with_name('spotify.json.' + secrets.token_hex(8))
             try:

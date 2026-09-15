@@ -74,6 +74,31 @@ Item {
             searchType.forceActiveFocus(Qt.TabFocusReason)
             compare(searchType.background.border.color, panel.green)
         }
+        function test_option_accessible_names_and_plain_text() {
+            const original = searchType.model
+            try {
+                for (const labels of [["Tracks", "Albums", "Artists", "Playlists"],
+                                      ["<b>Tracks</b>", "Albums & more", "Artists", "Playlists"]]) {
+                    searchType.model = labels
+                    searchType.popup.open()
+                    tryCompare(searchType.popup, "visible", true)
+                    const list = searchType.popup.contentItem
+                    tryCompare(list, "count", labels.length)
+                    wait(1)
+                    for (let i = 0; i < labels.length; i++) {
+                        const option = list.itemAtIndex(i)
+                        verify(option !== null)
+                        compare(option.Accessible.name, labels[i], "name belongs to the option control")
+                        compare(option.contentItem.textFormat, Text.PlainText)
+                        compare(option.contentItem.text, labels[i])
+                    }
+                    searchType.popup.close()
+                }
+            } finally {
+                searchType.popup.close()
+                searchType.model = original
+            }
+        }
         function test_keyboard_selection() {
             searchType.currentIndex = 0
             searchType.forceActiveFocus(Qt.TabFocusReason)

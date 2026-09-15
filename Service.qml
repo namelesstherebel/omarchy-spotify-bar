@@ -25,6 +25,9 @@ Item {
     property var pending: []
     property var current: null
     readonly property bool busy: current !== null
+    // QUrl stringification keeps reserved characters escaped. Decode only this
+    // local source URL once; command arguments remain literal argument-list data.
+    readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("core/spotifyctl.py").toString().replace(/^file:\/\//, ""))
     property bool helperTimedOut: false
     readonly property var playback: State.playbackView(apiPlayback, selectedDevice)
     property double sampledAt: Date.now()
@@ -76,22 +79,24 @@ Item {
         if (current || pending.length === 0) return
         current = pending[0]
         pending = pending.slice(1)
-        helper.command = ["python3", Qt.resolvedUrl("core/spotifyctl.py").toString().replace(/^file:\/\//, ""),
-            current.command, JSON.stringify(current.args)]
+        helper.command = ["python3", helperPath, current.command, JSON.stringify(current.args)]
         helperTimedOut = false
         helper.running = true
         watchdog.interval = current.command === "login" ? 215000 : 50000
         watchdog.restart()
     }
 
-    // Kill once and stay busy until the child is reaped. Ignore all late output;
+    // Request bounded owned-child cleanup and stay busy until the helper exits.
+    // Escalate only after its one-second reap budget. Ignore all late output;
     // the timed-out action may already have happened and must never be replayed.
     function expire() {
         if (!current || helperTimedOut) return
         helperTimedOut = true
         pending = []
-        if (helper.running) helper.signal(9)
-        else complete("", -1) // A failed start need not emit an exit signal.
+        if (helper.running) {
+            helper.signal(15)
+            cleanupWatchdog.restart()
+        } else complete("", -1) // A failed start need not emit an exit signal.
     }
 
     // Manual refresh clears network suspension, but cannot bypass auth or 429.
@@ -162,9 +167,11 @@ Item {
     function complete(raw, exitCode) {
         if (!current) return
         watchdog.stop()
+        cleanupWatchdog.stop()
         var job = current
-        if (job.cancelled || (job.owner && (panelOwners.indexOf(job.owner) < 0 ||
-                job.generation !== job.owner.listGeneration))) {
+        // Ordinary cancelled results are irrelevant; watchdog failures are global.
+        if (!helperTimedOut && (job.cancelled || (job.owner && (panelOwners.indexOf(job.owner) < 0 ||
+                job.generation !== job.owner.listGeneration)))) {
             current = null
             pump()
             return
@@ -238,7 +245,14 @@ Item {
         repeat: false
         onTriggered: bridge.expire()
     }
-    Component.onDestruction: if (helper.running) helper.signal(9)
+    Timer {
+        id: cleanupWatchdog
+        interval: 2000
+        repeat: false
+        onTriggered: if (bridge.current && bridge.helperTimedOut && helper.running) helper.signal(9)
+    }
+    // The helper unwinds and reaps its owned children even after this Item is gone.
+    Component.onDestruction: if (helper.running) helper.signal(15)
     Timer {
         interval: bridge.panelOpen ? 4000 : 15000
         running: bridge.enabled && !bridge.suspended

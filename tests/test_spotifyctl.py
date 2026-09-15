@@ -174,7 +174,7 @@ class SpotifyCtlSecurityTests(unittest.TestCase):
 
         client = spotifyctl.Client({"client_id": "d" * 32}, Path("/unused"))
         token = {"access_token": "access-value", "refresh_token": "refresh-value", "expires_at": 1}
-        with patch.object(spotifyctl.subprocess, "run", run):
+        with patch.object(spotifyctl, "run_owned", run):
             client.store_token(token)
         command, kwargs = calls[0]
         self.assertNotIn("access-value", command)

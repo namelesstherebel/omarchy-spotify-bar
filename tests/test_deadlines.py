@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Deadlines use local sockets/locks only, with isolated repository temp data."""
+"""Deadlines/cleanup use synthetic processes and local sockets/locks, never Spotify."""
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+import ctypes
 import json
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import tempfile
@@ -15,6 +20,87 @@ from test_spotifyctl import spotifyctl
 
 
 class DeadlineTests(unittest.TestCase):
+    def test_termination_reaps_owned_child_but_leaves_browser_alive(self):
+        # Real processes, synthetic executables, no keyring, browser or network.
+        libc = ctypes.CDLL(None)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)  # reap orphaned test processes
+        self.addCleanup(lambda: libc.prctl(36, previous.value, 0, 0, 0))
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for name in ('secret-tool', 'xdg-open'):
+                script = base / name
+                script.write_text('#!' + sys.executable + '\n'
+                    'import os, pathlib, signal, time\n'
+                    'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                    'pathlib.Path(os.environ["CHILD_DIR"], "' + name + '.pid").write_text(str(os.getpid()))\n'
+                    'time.sleep(60)\n')
+                script.chmod(0o700)
+            code = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+import spotifyctl as s
+s.COMMAND_TIMEOUT = 0.5 if sys.argv[3] == 'deadline' else 30
+s.load_config = lambda _: {'client_id': 'a' * 32}
+def work(client, *_):
+    if sys.argv[3] != 'browser': return client.secret('lookup')
+    # Use the actual login browser-launch path, with a local fake listener.
+    class Server:
+        socket = type('Socket', (), {'settimeout': lambda *_: None})()
+        get_request = finish_request = lambda *_: None
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def handle_request(self): client.secret('lookup')
+    s.HTTPServer = lambda *_: Server()
+    return client.login()
+s.Client.dispatch = work
+sys.exit(s.main(['status']))
+'''
+            for mode in ('terminate', 'deadline', 'browser'):
+                with self.subTest(mode=mode):
+                    for path in base.glob('*.pid'):
+                        path.unlink()
+                    process = subprocess.Popen([sys.executable, '-c', code,
+                        str(Path(spotifyctl.__file__).parent), directory, mode],
+                        env={**os.environ, 'PATH': directory + ':' + os.environ['PATH'],
+                             'CHILD_DIR': directory, 'XDG_STATE_HOME': directory},
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    pids = {}
+                    target = 'xdg-open' if mode == 'browser' else 'secret-tool'
+                    try:
+                        until = time.monotonic() + 3
+                        while time.monotonic() < until:
+                            pids = {p.stem: int(p.read_text()) for p in base.glob('*.pid') if p.read_text()}
+                            if target in pids:
+                                break
+                            time.sleep(0.01)
+                        self.assertIn(target, pids, 'helper must reach the child')
+                        start = time.monotonic()
+                        if mode != 'deadline':
+                            process.terminate()
+                        process.communicate(timeout=3)
+                        self.assertLess(time.monotonic() - start, 3)
+                        if mode == 'browser':
+                            os.kill(pids[target], 0)
+                            self.assertNotEqual(Path('/proc', str(pids[target]), 'stat').read_text().split()[2], 'Z')
+                        else:
+                            self.assertFalse(Path('/proc', str(pids[target])).exists(),
+                                             'owned child must be killed AND reaped')
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.communicate(timeout=3)
+                        for pid in pids.values():
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            try:
+                                os.waitpid(pid, 0)
+                            except ChildProcessError:
+                                pass
+
     def test_lock_contention_expires(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'test.lock'
@@ -102,8 +188,8 @@ class DeadlineTests(unittest.TestCase):
             instance = original(('127.0.0.1', 0), handler)
             address.append(instance.server_address)
             return instance
-        def browser(command, **_kwargs):
-            state = parse_qs(urlsplit(command[1]).query)['state'][0]
+        def browser(url):
+            state = parse_qs(urlsplit(url).query)['state'][0]
             def request():
                 with socket.create_connection(address[0], timeout=1) as peer:
                     headers = 'Host: 127.0.0.1:8888\r\n' * (2 if duplicate_host else 1)
@@ -116,7 +202,7 @@ class DeadlineTests(unittest.TestCase):
             threads.append(thread)
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(spotifyctl, 'HTTPServer', server), \
-                patch.object(spotifyctl.subprocess, 'run', browser):
+                patch.object(spotifyctl, 'open_browser', browser):
             client = spotifyctl.Client({'client_id': 'a' * 32}, Path(directory))
             with patch.object(client, 'http', return_value={
                     'access_token':'new', 'refresh_token':'refresh', 'expires_in':3600,
@@ -193,7 +279,7 @@ class DeadlineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(spotifyctl, 'HTTPServer', server), \
-                patch.object(spotifyctl.subprocess, 'run', browser), \
+                patch.object(spotifyctl, 'open_browser', browser), \
                 patch.object(spotifyctl, 'CALLBACK_TIMEOUT', 0.05, create=True):
             client = spotifyctl.Client({'client_id': 'a' * 32}, Path(directory))
             start = time.monotonic()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real slider and popup-owner code offscreen, without host or network."""
 from pathlib import Path
+import json
 import os
 import re
 import subprocess
@@ -80,6 +81,10 @@ Item {
             property bool running: true
             function signal(number) { }
         }
+        property QtObject cleanupWatchdog: QtObject {
+            function stop() { }
+            function restart() { }
+        }
         property QtObject watchdog: QtObject {
             function stop() { }
         }
@@ -93,6 +98,18 @@ Item {
                 next:"https://api.spotify.com/v1/me/tracks?offset=2"}
             const data = current.command === "search" ? {tracks:page} : page
             complete(JSON.stringify({ok:true,data:data}), 0)
+        }
+    }
+    Item {
+        id: pathService
+''' + service_properties + re.search(r'^    function pump\([\s\S]*?^    }', service_source, re.M)[0] + '''
+        property QtObject helper: QtObject {
+            property var command: []
+            property bool running: false
+        }
+        property QtObject watchdog: QtObject {
+            property int interval: 0
+            function restart() { }
         }
     }
     Component {
@@ -118,6 +135,14 @@ Item {
         name: "SpotifyControls"
         when: windowShown
         function init() { panel.service.calls = []; seek.value = 20000; volume.value = 50 }
+        function test_real_qt_helper_url_and_literal_arguments() {
+            const args = {query: "# %23 %25 % & ;"}
+            pathService.pending = [{command:"search",args:args}]
+            pathService.pump()
+            compare(pathService.helper.command[1], EXPECTED_HELPER_PATH)
+            compare(pathService.helper.command[2], "search")
+            compare(JSON.parse(pathService.helper.command[3]), args)
+        }
         function test_keyboard_data() { return [{tag: "seek", control: seek, command:"seek"}, {tag:"volume",control:volume,command:"volume"}] }
         function test_keyboard(data) {
             data.control.forceActiveFocus(Qt.TabFocusReason)
@@ -179,6 +204,108 @@ Item {
             compare(shared.panelOpen, true)
             b.destroy(); wait(1)
             compare(shared.panelOpen, false)
+        }
+        function action(parent, label) {
+            if (parent.text === label && typeof parent.clicked === "function") return parent
+            for (let child of parent.children || []) {
+                const found = action(child, label)
+                if (found) return found
+            }
+            return null
+        }
+        function test_correct_saved_client_id_without_connecting() {
+            listService.authenticated = false
+            listService.configured = true
+            listService.current = null; listService.pending = []
+            const widget = listWidgetFactory.createObject(panel)
+            try {
+                widget.popupOpen = true
+                wait(1)
+                const input = widget.player.clientControl
+                compare(input.visible, true, "saved but unauthenticated ID remains editable")
+                input.text = "b".repeat(32)
+                const save = action(widget.player, "Save Client ID")
+                const connect = action(widget.player, "Connect Spotify")
+                verify(save !== null, "saving is independent of Connect")
+                verify(connect !== null)
+                compare(save.enabled, true)
+                save.clicked()
+                compare(listService.current.command, "configure")
+                compare(listService.current.args.client_id, input.text)
+                compare(save.enabled, false)
+                compare(input.enabled, false)
+                compare(connect.enabled, false)
+                input.accepted() // Even a programmatic Enter cannot bypass busy.
+                compare(listService.pending.length, 0)
+                listService.current = null
+                input.text = "c".repeat(32)
+                input.accepted()
+                compare(listService.current.command, "configure")
+                compare(listService.current.args.client_id, input.text)
+                listService.current = null
+                connect.clicked()
+                compare(listService.current.command, "login")
+                compare(Object.keys(listService.current.args).length, 0)
+            } finally {
+                widget.destroy(); wait(1)
+                listService.current = null; listService.pending = []
+            }
+        }
+        function test_browsing_without_device_data() {
+            return [{tag:"library", tab:0}, {tag:"search", tab:1}, {tag:"queue", tab:2}]
+        }
+        function test_browsing_without_device(data) {
+            listService.authenticated = true
+            listService.selectedDevice = null; listService.apiPlayback = null
+            listService.current = null; listService.pending = []
+            listService.stale = false
+            const widget = listWidgetFactory.createObject(panel)
+            try {
+                widget.player.tab = data.tab
+                widget.player.searchControl.text = "needle"
+                widget.popupOpen = true
+                wait(1)
+                compare(listService.current.command, ["library", "search", "queue"][data.tab])
+                const track = {uri:"spotify:track:Example", name:"Track"}
+                const page = {items:[track], offset:0, limit:1, next:"https://api.spotify.com/v1/search?offset=1"}
+                listService.complete(JSON.stringify({ok:true, data:data.tab === 2 ? {queue:[track]}
+                    : data.tab === 1 ? {tracks:page} : page}), 0)
+                const results = widget.player.resultControl
+                compare(results.visible, true, "browsing must not require a playback device")
+                compare(widget.player.deviceControl.visible, false)
+                tryCompare(results, "count", 1)
+                wait(1)
+                const row = results.itemAtIndex(0)
+                verify(row !== null)
+                compare(action(row, "▶").enabled, false)
+                compare(action(row, "+").enabled, false)
+                compare(action(row, "♡").enabled, true)
+                results.forceActiveFocus()
+                keyClick(Qt.Key_Return)
+                compare(listService.current, null, "Enter cannot play without a device")
+                action(row, "♡").clicked()
+                compare(listService.current.command, "save")
+                listService.current = null
+                if (data.tab !== 2) {
+                    action(results.footerItem, "Load more").clicked()
+                    compare(listService.current.args.offset, 1)
+                    listService.current = null
+                }
+                widget.listState.items = [State.itemView({uri:"spotify:album:Example",name:"Album"})]
+                wait(1)
+                const open = action(results.itemAtIndex(0), "Open")
+                compare(open.visible, true); compare(open.enabled, true)
+                open.clicked()
+                compare(listService.current.command, "browse")
+                compare(listService.current.args.uri, "spotify:album:Example")
+                listService.current = null
+                widget.player.tab = 3
+                compare(results.visible, false)
+                compare(widget.player.deviceControl.visible, true)
+            } finally {
+                widget.destroy(); wait(1)
+                listService.current = null; listService.pending = []
+            }
         }
         function test_two_popup_lists_data() {
             return [{tag:"close-library", closeSearch:false, destroy:false},
@@ -245,13 +372,13 @@ Item {
 }
 '''
 def main():
-    with tempfile.TemporaryDirectory(prefix='oma-controls-') as directory:
+    with tempfile.TemporaryDirectory(prefix='oma-controls-# %23 %25 %-') as directory:
         path = Path(directory) / 'tst_controls.qml'
-        path.write_text(qml)
+        path.write_text(qml.replace('EXPECTED_HELPER_PATH', json.dumps(str(Path(directory) / 'core/spotifyctl.py'))))
         # Expose existing controls for keyboard testing; all handlers/bindings
         # remain the real panel source. Synthetic pages have no artwork URLs.
         (Path(directory) / 'TestSpotifyPanel.qml').write_text(source.replace(
-            '    id: panel\n', '    id: panel\n    property alias resultControl: results\n    property alias searchControl: search\n').replace(
+            '    id: panel\n', '    id: panel\n    property alias resultControl: results\n    property alias searchControl: search\n    property alias clientControl: clientId\n    property alias deviceControl: deviceList\n').replace(
             '"assets/spotify.svg"', '"' + (root / 'assets/spotify.svg').as_uri() + '"'))
         runtime = Path(directory) / 'runtime'
         cache = Path(directory) / 'cache'
