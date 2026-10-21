@@ -66,3 +66,15 @@ test("auth and rate-limit failures preserve stale playback safely", () => {
   assert.equal(limited.authenticated, true);
   assert.equal(limited.retryAt, 3000);
 });
+
+test("playback position preserves API milliseconds for elapsed time and seek", () => {
+  const device = {id: "test-device", name: "Test device", is_restricted: false};
+  for (const progress of [0, 90, 90000, 179999]) {
+    const view = context.playbackView({device,
+      item: {name: "Track", duration_ms: 180000},
+      progress_ms: progress, is_playing: true}, null);
+    assert.equal(view.position, progress);
+    assert.equal(view.duration, 180000);
+    assert.equal(view.playing, true);
+  }
+});

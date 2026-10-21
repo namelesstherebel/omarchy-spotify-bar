@@ -156,7 +156,7 @@ function playbackView(api, selectedDevice) {
         album: album.name || "",
         art: images.length ? artUrl(images[0].url) : "",
         uri: item.uri || "", duration: item.duration_ms || 0,
-        position: number(api.progress_ms) ? api.progress_ms / 1000 : 0,
+        position: number(api.progress_ms) ? api.progress_ms : 0,
         playing: api.is_playing === true,
         source: "api", deviceId: device.id || "", deviceName: device.name || "No active device",
         canControl: available, canVolume: available && device.supports_volume !== false && device.volume_percent !== null,
