@@ -1,0 +1,5 @@
+# Pullfrog is this repository's automatic reviewer (cutover approved by Stefan, 2026-10-21).
+# CodeRabbit remains available on demand: comment "@coderabbitai review" on a PR.
+reviews:
+  auto_review:
+    enabled: false
