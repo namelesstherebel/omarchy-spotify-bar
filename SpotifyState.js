@@ -1,4 +1,4 @@
-// Pure state transformations shared by the QML bridge and headless tests.
+// Shared pure state transformations for the QML bridge and headless tests.
 
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value) }
 function string(value) { return typeof value === "string" }
