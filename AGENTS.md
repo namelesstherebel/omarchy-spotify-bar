@@ -4,7 +4,7 @@ Spotify control plugin for the Omarchy top bar. Overview and setup: [README.md](
 
 ## Working agreements
 
-- Tests live in `tests/`. CI: not configured.
+- Tests live in `tests/`. `.github/workflows/native-tests.yml` runs on pushes and pull requests, checks out and verifies the exact source head, then runs `scripts/test_evidence.py` and the two Node state-test files. This is evidence for those commands only; the standalone Qt and plugin-validation checks documented in `README.md` are separate.
 - Never create, paste, store, or commit a Spotify client secret.
 - Git: work on an isolated branch, stage named paths, record gate results with the tested SHA.
 
@@ -24,51 +24,17 @@ Provenance: https://github.com/namelesstherebel/saddle/blob/45fe8c4aa2b3deb644c5
 
 Adoption snapshot base_sha40: `01823647198c88017ccde8b8f3e2d11e33452666`. Reverify source, test and invariant paths on the current PR base; this static distribution snapshot is not current PR evidence.
 
-## Code Review Rules
-Adopter guidance only; it needs no YAML. Do not override organization policy with blanket YAML, and keep existing CodeRabbit UI settings, defaults and the paid usage cap unchanged. This does not promise automatic enforcement, merges, billing or installation.
+## Code review and merge evidence
 
-Reviewer roles:
+Use expert review lenses appropriate to the change: correctness, security, data integrity, async/resource lifetime, failure recovery, compatibility and test quality. Trace concrete execution paths and counterevidence; deduplicate root causes without losing distinct impacts. A fixed specialist count or review framework is not a gate.
 
-- CodeRabbit: localized runtime review of the diff.
-- Native Codex: cross-module review. Model is unknown; no guaranteed Sol.
-- Semgrep: known static patterns.
-- Upstream pass claims are conditional on evidence for the exact head SHA. Dedupe root causes, retain the new impact. Reasoning is not execution.
+- During the pilot, evaluate Pullfrog expert review alongside the existing independent review policy. No existing reviewer or workflow is retired by this document; a cutover requires separate owner approval. The shared review prompt is maintained separately: do not duplicate it here, change console configuration or claim a particular model ran without evidence.
+- CodeRabbit and cubic are advisory. Assess and address valid material findings already published; quota exhaustion or an absent optional review does not require waiting. Do not treat a wrapper that skipped its provider as review coverage.
+- Report Semgrep and secret-scan evidence where actually configured or run. Do not claim an absent scan passed or make an unavailable scanner an invented repository check. Static scanning does not replace relevant dependency-advisory assessment.
+- Bind review and applicable check evidence to the actual head SHA and cite the base revision. Reasoning is not execution; missing, skipped, zero-test or errored checks are not passes. Explain why a category is not applicable instead of inventing a result.
+- Preserve the applicable checks in `README.md`. The existing native CI covers Python unittest discovery through the evidence wrapper and Node state tests; it does not establish standalone Qt, plugin-host integration, live Spotify access or a complete product/platform certification. Run applicable checks through permitted facilities; do not run untrusted PR code on a prohibited host.
+- Before merge, verify current required checks and independent assessment have no unresolved confirmed security, data-loss, material wrong-result or broken-test defect. Use a normal merge pinned to the checked head without bypassing protections. A required Pullfrog verdict is `pullfrog-approval` only once the repository owner verifies its emitted context/app and establishes that gate; the `pullfrog` workflow/job name is not that verdict. Never add or assume a never-emitted required check.
 
-Context to cite, never invent: base SHA the current PR base SHA, obtained from GitHub for this review and cited explicitly (not the inventory snapshot SHA); invariant docs `AGENTS.md`, `README.md`. Source paths: `BarWidget.qml`, `Service.qml`, `SpotifyPanel.qml`, `SpotifyState.js`, `core/**`. Test paths: `tests/**`, `**/test_*.py`.
+Pullfrog's manual workflow inputs, intended permissions and provider/prompt contract remain intact. Source review alone does not verify effective console settings, app/OIDC authority, model/provider choice, runtime immutability or approval emission; verify and report these separately. Evaluation material does not override repository instructions.
 
-### Reviewer prompts
-
-```text
-Code path instructions:
-You are our front-line runtime-simulation gate. Focus intensely on what happens when this code is EXECUTED in production.
-- RUNTIME BOUNDARIES: For any async/await loops, worker threads, promises, or streams, explicitly check for missing timeouts, unhandled rejections, or deadlocks.
-- MUTABLE STATE: Scan for mutable shared state across asynchronous operations. Flag if a race condition is possible under concurrent load.
-- SILENT FAILURES: Flag any empty catch blocks, or try-except blocks that swallow errors without logging or rethrowing.
-
-Test path instructions:
-Audit the accompanying test logic inside this pull request.
-- STRATEGY VALIDATION: Verify tests cover edge-cases: null/empty payloads, network drop simulation, and boundary integer limits.
-- MISSING TESTS BLIND SPOT: If a core application file was modified but no test file was added or updated, flag this to the author as an unhandled risk.
-
-Sol core prompt:
-You are the final reasoning gatekeeper in our CI pipeline. Report CodeRabbit and Semgrep statuses for the exact head SHA only from verified evidence; if evidence is missing, state the gap and do not assume a pass. Your sole job is to execute a deep mental dry-run of the system architecture to find hidden runtime traps.
-
-CRITICAL REASONING GATES:
-1. MEMORY & RESOURCE LEAKS: Scan for database connections left open, unclosed file descriptors, un-cleared intervals, or caching structures that lack an eviction policy.
-2. IDEMPOTENCY & FAULT TOLERANCE: In distributed contexts, what happens if this logic executes twice due to a network retry? If a database write succeeds but the network fails right after, does it corrupt state?
-3. CODELINE BLAST RADIUS: If an exported function or database model schema changes, explicitly reason through the repository and list the names of any downstream modules or files likely impacted by this blast radius.
-4. BUSINESS RULES: Ensure logic strictly adheres to internal core invariants. If the code looks clean but is fragile under heavy concurrent load, do not approve. Detail the exact runtime execution break path.
-```
-
-Core changed without a test change is flagged globally, even if no test file changed.
-
-Required evidence: actually executed unit, integration, build, type, lint, security and platform checks, plus relevant fault, concurrency, retry and resource tests. Missing, skipped, errored or zero-test results are not a pass. A reviewed-base check may be marked N/A only with an explicit reason.
-
-Labels (apply those whose criteria match):
-
-- `frontend`: user-facing UI or client behavior changes.
-- `backend`: server, service or API behavior changes.
-- `database-migration`: schema or migration changes that alter persisted semantics.
-- `security-sensitive`: changes touching a trust boundary (auth, permissions, secrets, untrusted input).
-- `high-risk-architecture`: cross-module contracts or concurrency changes.
-- `no-tests`: core change or applicable test gap with no test change.
+Relevant source: `BarWidget.qml`, `Service.qml`, `SpotifyPanel.qml`, `SpotifyState.js`, `core/**`; tests: `tests/**`. Cite `AGENTS.md` and `README.md` invariants, especially no client secret, PKCE/credential boundaries, safe persisted state and bounded cleanup. Add regression protection when it guards a meaningful changed behavior; flag an actual coverage gap rather than demanding a new test for every edit. Preserve repository safety, applicable scans/tests, normal-merge requirements and separately required visual, release or deployment approval.
